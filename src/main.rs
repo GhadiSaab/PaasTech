@@ -1,4 +1,4 @@
-use actix_web::{App, HttpResponse, HttpServer, Responder, get, post, web};
+use actix_web::{App, HttpResponse, HttpServer, Responder, get, post};
 
 /* boilerplates for reference */
 #[get("/")]
@@ -14,22 +14,27 @@ async fn echo(req_body: String) -> impl Responder {
 // real stuff
 
 #[post("/app/upload")]
-async fn upload_app(req_body: String) -> impl Responder {
+async fn upload_app(_req_body: String) -> impl Responder {
     HttpResponse::Ok()
 }
 
 #[actix_web::main]
 async fn main() -> std::io::Result<()> {
-    const IP: &str = "127.0.0.1";
-    const PORT: u16 = 8080;
+    dotenvy::dotenv().ok();
 
-    println!("Running on http://{}:{}", IP, PORT);
+    let host: String = std::env::var("HOST").unwrap_or_else(|_| "127.0.0.1".to_string());
+    let port: u16 = std::env::var("PORT")
+        .unwrap_or_else(|_| "8080".to_string())
+        .parse()
+        .expect("PORT must be a valid number");
+
+    println!("Running on http://{}:{}", host, port);
     HttpServer::new(|| {
         App::new()
             .service(hello)
             .service(upload_app)
     })
-    .bind((IP, PORT))?
+    .bind((host, port))?
     .run()
     .await
 }
