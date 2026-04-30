@@ -1,0 +1,20 @@
+stages:
+  - lint
+  - security
+  - documentation
+
+variables:
+  CARGO_HOME: "$CI_PROJECT_DIR/.cargo"
+
+.rust-base:
+  image: rust:latest
+  cache:
+    key: "$CI_COMMIT_REF_SLUG"
+    paths:
+      - .cargo/
+      - target/
+
+include:
+  - .gitlab/ci/lint.yml
+  - .gitlab/ci/security.yml
+  - .gitlab/ci/documentation.yml
