@@ -5,4 +5,5 @@ edition = "2024"
 
 [dependencies]
 actix-web = "4"
+bollard = "*"
 dotenvy = "0.15"
