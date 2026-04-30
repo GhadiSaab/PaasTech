@@ -5,5 +5,8 @@ edition = "2024"
 
 [dependencies]
 actix-web = "4"
+actix-multipart = "0.7"
+futures-util = "0.3"
+tokio = "1.52.1"
 bollard = "*"
 dotenvy = "0.15"
