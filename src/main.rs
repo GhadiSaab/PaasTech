@@ -8,7 +8,7 @@ use sqlx::PgPool;
 use std::path::Path;
 mod engine;
 
-use crate::engine::{extract_zip, save_multipart_file};
+use crate::engine::{extract_zip, launch_code, save_multipart_file};
 use actix_multipart::Multipart;
 use actix_web::{App, Error, HttpResponse, HttpServer, Responder, post};
 use tokio::fs;
@@ -73,11 +73,11 @@ async fn upload_app(payload: Multipart) -> Result<impl Responder, Error> {
 
     println!("Zip file uploaded to {:?}", zip_filepath);
 
-    match extract_zip(&zip_filepath).await {
-        Ok(_) => Ok(HttpResponse::Ok().body("extraction successful.")),
-        Err(e) => {
-            eprintln!("extratc failed: {}", e);
-            Ok(HttpResponse::InternalServerError().body("Extraction failed"))
-        }
-    }
+    let extracted_folder = extract_zip(zip_filepath).await.expect("extract failed");
+
+    println!("Extraction worked");
+
+    launch_code(extracted_folder).await;
+
+    Ok(HttpResponse::Ok().body("risen\n"))
 }
