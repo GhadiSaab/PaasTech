@@ -34,12 +34,6 @@ impl Registry {
             r#"
             INSERT INTO applications (id, name, image_id, container_id, port, status, env, created_at)
             VALUES ($1, $2, $3, $4, $5, $6, $7, NOW())
-            ON CONFLICT (name) DO UPDATE
-                SET image_id = EXCLUDED.image_id,
-                    container_id = EXCLUDED.container_id,
-                    port = EXCLUDED.port,
-                    status = EXCLUDED.status,
-                    env = EXCLUDED.env
             RETURNING id, name, image_id, container_id, port, status, env, created_at
             "#,
             Uuid::new_v4(),

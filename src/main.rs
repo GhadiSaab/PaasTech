@@ -6,6 +6,7 @@ use crate::engine::{extract_zip, launch_code, save_multipart_file};
 use actix_multipart::Multipart;
 use actix_web::{App, Error, HttpResponse, HttpServer, Responder, delete, error, get, patch, post, web};
 use futures_util::TryStreamExt;
+use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
 use tokio::fs;
@@ -13,15 +14,47 @@ use tokio::fs::File;
 use tokio::io::AsyncWriteExt;
 use uuid::Uuid;
 
-<<<<<<< HEAD
 use registry::Registry;
 use scheduler::Scheduler;
-||||||| parent of 741f3cb (feat(api): add services and link with database)
-// variables
-const MAX_PAYLOAD_SIZE: usize = 262_144; // 256k
-=======
-const MAX_PAYLOAD_SIZE: usize = 262_144;
->>>>>>> 741f3cb (feat(api): add services and link with database)
+
+const VALID_SERVICES: &[&str] = &["postgres", "redis", "s3"];
+
+fn docker_image_for_service(name: &str) -> &'static str {
+    match name {
+        "postgres" => "library/postgres",
+        "redis" => "library/redis",
+        "s3" => "dxflrs/garage",
+        _ => unreachable!(),
+    }
+}
+
+async fn validate_docker_tag(client: &Client, image: &str, tag: &str) -> Result<(), Error> {
+    let url = format!("https://hub.docker.com/v2/repositories/{}/tags/{}/", image, tag);
+    let resp = client
+        .get(&url)
+        .send()
+        .await
+        .map_err(|_| error::ErrorInternalServerError("Failed to reach Docker Hub"))?;
+
+    match resp.status().as_u16() {
+        200 => Ok(()),
+        404 => Err(error::ErrorBadRequest(format!(
+            "Version '{}' does not exist for this service on Docker Hub",
+            tag
+        ))),
+        _ => Err(error::ErrorInternalServerError("Unexpected response from Docker Hub")),
+    }
+}
+
+#[derive(Deserialize)]
+struct DockerTagsResponse {
+    results: Vec<DockerTag>,
+}
+
+#[derive(Deserialize)]
+struct DockerTag {
+    name: String,
+}
 
 struct Config {
     host: String,
@@ -65,10 +98,14 @@ async fn main() -> std::io::Result<()> {
 
     let scheduler = web::Data::new(Scheduler::new());
 
+    let http_client = Client::new();
+
     println!("Running on http://{}:{}", config.host, config.port);
     HttpServer::new(move || {
         App::new()
             .app_data(web::Data::new(pool.clone()))
+            .app_data(web::Data::new(http_client.clone()))
+            .service(get_service_versions)
             .app_data(scheduler.clone())
             .service(upload_app)
             .service(list_apps)
@@ -112,6 +149,47 @@ struct UpdateResourcePayload {
 }
 
 // routes
+
+#[get("/service/{name}/versions")]
+async fn get_service_versions(
+    client: web::Data<Client>,
+    name: web::Path<String>,
+) -> Result<impl Responder, Error> {
+    if !VALID_SERVICES.contains(&name.as_str()) {
+        return Err(error::ErrorBadRequest(format!(
+            "Invalid service name '{}'. Must be one of: {}",
+            name,
+            VALID_SERVICES.join(", ")
+        )));
+    }
+
+    let docker_image = docker_image_for_service(&name);
+    let url = format!(
+        "https://hub.docker.com/v2/repositories/{}/tags/?page_size=50&ordering=last_updated",
+        docker_image
+    );
+
+    let resp = client
+        .get(&url)
+        .send()
+        .await
+        .map_err(|_| error::ErrorInternalServerError("Failed to reach Docker Hub"))?;
+
+    if !resp.status().is_success() {
+        return Err(error::ErrorInternalServerError(
+            "Failed to fetch versions from Docker Hub",
+        ));
+    }
+
+    let tags: DockerTagsResponse = resp
+        .json()
+        .await
+        .map_err(|_| error::ErrorInternalServerError("Failed to parse Docker Hub response"))?;
+
+    let versions: Vec<String> = tags.results.into_iter().map(|t| t.name).collect();
+
+    Ok(HttpResponse::Ok().json(versions))
+}
 
 #[post("/app/upload")]
 async fn upload_app(payload: Multipart) -> Result<impl Responder, Error> {
@@ -247,8 +325,20 @@ mod tests;
 #[post("/resource")]
 async fn create_resource(
     pool: web::Data<PgPool>,
+    client: web::Data<Client>,
     payload: web::Json<CreateResourcePayload>,
 ) -> Result<impl Responder, Error> {
+    if !VALID_SERVICES.contains(&payload.name.as_str()) {
+        return Err(error::ErrorBadRequest(format!(
+            "Invalid service name '{}'. Must be one of: {}",
+            payload.name,
+            VALID_SERVICES.join(", ")
+        )));
+    }
+
+    let docker_image = docker_image_for_service(&payload.name);
+    validate_docker_tag(&client, docker_image, &payload.version).await?;
+
     let id = Uuid::new_v4();
 
     sqlx::query!(
@@ -345,11 +435,23 @@ async fn get_resource(
 #[patch("/resource/{id}")]
 async fn update_resource(
     pool: web::Data<PgPool>,
+    client: web::Data<Client>,
     id: web::Path<String>,
     payload: web::Json<UpdateResourcePayload>,
 ) -> Result<impl Responder, Error> {
     let uuid = Uuid::parse_str(&id)
         .map_err(|_| error::ErrorBadRequest("Invalid resource id"))?;
+
+    if let Some(version) = &payload.version {
+        let service = sqlx::query!("SELECT name FROM services WHERE id = $1", uuid)
+            .fetch_optional(pool.get_ref())
+            .await
+            .map_err(error::ErrorInternalServerError)?
+            .ok_or_else(|| error::ErrorNotFound("Resource not found"))?;
+
+        let docker_image = docker_image_for_service(&service.name);
+        validate_docker_tag(&client, docker_image, version).await?;
+    }
 
     let result = sqlx::query!(
         r#"UPDATE services
