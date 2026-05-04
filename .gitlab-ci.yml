@@ -7,9 +7,7 @@ variables:
   CARGO_HOME: "$CI_PROJECT_DIR/.cargo"
 
 .rust-base:
-  image:
-    name: rust:1
-    pull_policy: if-not-present
+  image: rust:1
   cache:
     key: "$CI_COMMIT_REF_SLUG"
     paths:
