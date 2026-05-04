@@ -4,14 +4,24 @@ mod scheduler;
 
 use crate::engine::{extract_zip, launch_code, save_multipart_file};
 use actix_multipart::Multipart;
-use actix_web::{App, Error, HttpResponse, HttpServer, Responder, delete, error, get, post, patch, web};
-use serde::{Deserialize, Serialize};
+use actix_web::{App, Error, HttpResponse, HttpServer, Responder, delete, error, get, patch, post, web};
 use futures_util::TryStreamExt;
+use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
 use tokio::fs;
+use tokio::fs::File;
+use tokio::io::AsyncWriteExt;
+use uuid::Uuid;
 
+<<<<<<< HEAD
 use registry::Registry;
 use scheduler::Scheduler;
+||||||| parent of 741f3cb (feat(api): add services and link with database)
+// variables
+const MAX_PAYLOAD_SIZE: usize = 262_144; // 256k
+=======
+const MAX_PAYLOAD_SIZE: usize = 262_144;
+>>>>>>> 741f3cb (feat(api): add services and link with database)
 
 struct Config {
     host: String,
@@ -77,12 +87,28 @@ async fn main() -> std::io::Result<()> {
 }
 
 // structs
+
 #[derive(Serialize, Deserialize)]
 struct Resource {
+    id: String,
     display_name: String,
     name: String,
     version: String,
     application_ids: Vec<String>,
+}
+
+#[derive(Deserialize)]
+struct CreateResourcePayload {
+    display_name: String,
+    name: String,
+    version: String,
+    application_id: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct UpdateResourcePayload {
+    display_name: Option<String>,
+    version: Option<String>,
 }
 
 // routes
@@ -218,31 +244,59 @@ async fn status_app(
 #[cfg(test)]
 mod tests;
 
-#[post("/app/resource")]
-async fn create_resource(mut payload: web::Payload) -> Result<impl Responder, Error> {
-    let mut body = web::BytesMut::new();
-    while let Ok(Some(chunk)) = payload.try_next().await {
-        if (body.len() + chunk.len()) > MAX_PAYLOAD_SIZE {
-            return Err(error::ErrorBadRequest("overflow"));
+#[post("/resource")]
+async fn create_resource(
+    pool: web::Data<PgPool>,
+    payload: web::Json<CreateResourcePayload>,
+) -> Result<impl Responder, Error> {
+    let id = Uuid::new_v4();
+
+    sqlx::query!(
+        "INSERT INTO services (id, display_name, name, version) VALUES ($1, $2, $3, $4)",
+        id,
+        payload.display_name,
+        payload.name,
+        payload.version,
+    )
+    .execute(pool.get_ref())
+    .await
+    .map_err(error::ErrorInternalServerError)?;
+
+    if let Some(app_id) = &payload.application_id {
+        if !app_id.is_empty() {
+            let app_uuid = Uuid::parse_str(app_id)
+                .map_err(|_| error::ErrorBadRequest("Invalid application_id"))?;
+            sqlx::query!(
+                "INSERT INTO application_services (application_id, service_id) VALUES ($1, $2)",
+                app_uuid,
+                id,
+            )
+            .execute(pool.get_ref())
+            .await
+            .map_err(error::ErrorInternalServerError)?;
         }
-        body.extend_from_slice(&chunk);
     }
 
-    let resource: Resource = serde_json::from_slice::<Resource>(&body)?;
-    Ok(HttpResponse::Ok().json(resource))
+    Ok(HttpResponse::Created().json(Resource {
+        id: id.to_string(),
+        display_name: payload.display_name.clone(),
+        name: payload.name.clone(),
+        version: payload.version.clone(),
+        application_ids: payload
+            .application_id
+            .as_deref()
+            .filter(|s| !s.is_empty())
+            .map(|s| vec![s.to_string()])
+            .unwrap_or_default(),
+    }))
 }
 
-#[patch("/app/resource")]
-async fn update_resource(mut _payload: web::Payload) -> Result<impl Responder, Error> {
-    // TODO update resource in database
-    Ok(HttpResponse::Ok().body("Resource successfully updated"))
-}
-
-#[get("/app/resource")]
-async fn get_resources(pool: web::Data<sqlx::PgPool>) -> Result<impl Responder, Error> {
+#[get("/resource")]
+async fn get_resources(pool: web::Data<PgPool>) -> Result<impl Responder, Error> {
     let resources = sqlx::query_as!(
         Resource,
         r#"SELECT
+            s.id::text as "id!",
             s.display_name,
             s.name,
             s.version,
@@ -258,8 +312,82 @@ async fn get_resources(pool: web::Data<sqlx::PgPool>) -> Result<impl Responder, 
     Ok(HttpResponse::Ok().json(resources))
 }
 
-#[delete("/app/resource")]
-async fn delete_resource(mut _payload: web::Payload) -> Result<impl Responder, Error> {
-    // TODO delete resource from database
-    Ok(HttpResponse::Ok().body("Resource successfully deleted"))
+#[get("/resource/{id}")]
+async fn get_resource(
+    pool: web::Data<PgPool>,
+    id: web::Path<String>,
+) -> Result<impl Responder, Error> {
+    let uuid = Uuid::parse_str(&id)
+        .map_err(|_| error::ErrorBadRequest("Invalid resource id"))?;
+
+    let resource = sqlx::query_as!(
+        Resource,
+        r#"SELECT
+            s.id::text as "id!",
+            s.display_name,
+            s.name,
+            s.version,
+            COALESCE(array_agg(aps.application_id::text) FILTER (WHERE aps.application_id IS NOT NULL), '{}') as "application_ids!: Vec<String>"
+        FROM services s
+        LEFT JOIN application_services aps ON s.id = aps.service_id
+        WHERE s.id = $1
+        GROUP BY s.id, s.display_name, s.name, s.version"#,
+        uuid
+    )
+    .fetch_optional(pool.get_ref())
+    .await
+    .map_err(error::ErrorInternalServerError)?
+    .ok_or_else(|| error::ErrorNotFound("Resource not found"))?;
+
+    Ok(HttpResponse::Ok().json(resource))
+}
+
+#[patch("/resource/{id}")]
+async fn update_resource(
+    pool: web::Data<PgPool>,
+    id: web::Path<String>,
+    payload: web::Json<UpdateResourcePayload>,
+) -> Result<impl Responder, Error> {
+    let uuid = Uuid::parse_str(&id)
+        .map_err(|_| error::ErrorBadRequest("Invalid resource id"))?;
+
+    let result = sqlx::query!(
+        r#"UPDATE services
+        SET
+            display_name = COALESCE($1, display_name),
+            version = COALESCE($2, version)
+        WHERE id = $3"#,
+        payload.display_name,
+        payload.version,
+        uuid,
+    )
+    .execute(pool.get_ref())
+    .await
+    .map_err(error::ErrorInternalServerError)?;
+
+    if result.rows_affected() == 0 {
+        return Err(error::ErrorNotFound("Resource not found"));
+    }
+
+    Ok(HttpResponse::Ok().body("Resource successfully updated"))
+}
+
+#[delete("/resource/{id}")]
+async fn delete_resource(
+    pool: web::Data<PgPool>,
+    id: web::Path<String>,
+) -> Result<impl Responder, Error> {
+    let uuid = Uuid::parse_str(&id)
+        .map_err(|_| error::ErrorBadRequest("Invalid resource id"))?;
+
+    let result = sqlx::query!("DELETE FROM services WHERE id = $1", uuid)
+        .execute(pool.get_ref())
+        .await
+        .map_err(error::ErrorInternalServerError)?;
+
+    if result.rows_affected() == 0 {
+        return Err(error::ErrorNotFound("Resource not found"));
+    }
+
+    Ok(HttpResponse::NoContent().finish())
 }
