@@ -1,7 +1,9 @@
-use sqlx::PgPool;
-use uuid::Uuid;
+#![allow(dead_code)]
+
 use chrono::NaiveDateTime;
 use serde_json::Value;
+use sqlx::PgPool;
+use uuid::Uuid;
 
 #[derive(Debug, sqlx::FromRow)]
 pub struct App {
@@ -86,21 +88,14 @@ impl Registry {
     }
 
     pub async fn delete(pool: &PgPool, name: &str) -> Result<(), sqlx::Error> {
-        sqlx::query!(
-            r#"DELETE FROM applications WHERE name = $1"#,
-            name,
-        )
-        .execute(pool)
-        .await?;
+        sqlx::query!(r#"DELETE FROM applications WHERE name = $1"#, name,)
+            .execute(pool)
+            .await?;
 
         Ok(())
     }
 
-    pub async fn update_status(
-        pool: &PgPool,
-        name: &str,
-        status: &str,
-    ) -> Result<(), sqlx::Error> {
+    pub async fn update_status(pool: &PgPool, name: &str, status: &str) -> Result<(), sqlx::Error> {
         sqlx::query!(
             r#"UPDATE applications SET status = $1 WHERE name = $2"#,
             status,

@@ -1,36 +1,46 @@
+use actix_web::rt::time::sleep;
 use bollard::Docker;
 use bollard::models::ContainerCreateBody;
 use bollard::query_parameters::{
-    CreateContainerOptionsBuilder, ListContainersOptionsBuilder,
-    RemoveContainerOptionsBuilder, RestartContainerOptionsBuilder,
-    StartContainerOptionsBuilder, StopContainerOptionsBuilder,
+    CreateContainerOptionsBuilder, ListContainersOptionsBuilder, RemoveContainerOptionsBuilder,
+    RestartContainerOptionsBuilder, StartContainerOptionsBuilder, StopContainerOptionsBuilder,
 };
-use actix_web::rt::time::sleep;
 use sqlx::PgPool;
 use std::time::Duration;
 
 use crate::registry::Registry;
 
+#[allow(dead_code)]
 pub struct Scheduler {
     docker: Docker,
 }
 
+#[allow(dead_code)]
 impl Scheduler {
     pub fn new() -> Self {
-        let docker = Docker::connect_with_defaults().expect("Impossible de se connecter au Docker Engine");
+        let docker =
+            Docker::connect_with_defaults().expect("Impossible de se connecter au Docker Engine");
         Self { docker }
     }
 
     pub async fn stop(&self, pool: &PgPool, app_name: &str) {
-        if let Err(e) = self.docker
-            .stop_container(app_name, Some(StopContainerOptionsBuilder::default().build()))
+        if let Err(e) = self
+            .docker
+            .stop_container(
+                app_name,
+                Some(StopContainerOptionsBuilder::default().build()),
+            )
             .await
         {
             eprintln!("docker: failed to stop {app_name}: {e}");
         }
 
-        if let Err(e) = self.docker
-            .remove_container(app_name, Some(RemoveContainerOptionsBuilder::default().build()))
+        if let Err(e) = self
+            .docker
+            .remove_container(
+                app_name,
+                Some(RemoveContainerOptionsBuilder::default().build()),
+            )
             .await
         {
             eprintln!("docker: failed to remove {app_name}: {e}");
@@ -54,7 +64,9 @@ impl Scheduler {
 
     pub async fn list(&self) -> Vec<String> {
         self.docker
-            .list_containers(Some(ListContainersOptionsBuilder::default().all(true).build()))
+            .list_containers(Some(
+                ListContainersOptionsBuilder::default().all(true).build(),
+            ))
             .await
             .unwrap()
             .into_iter()
@@ -65,8 +77,12 @@ impl Scheduler {
     }
 
     pub async fn restart(&self, app_name: &str) {
-        if let Err(e) = self.docker
-            .restart_container(app_name, Some(RestartContainerOptionsBuilder::default().build()))
+        if let Err(e) = self
+            .docker
+            .restart_container(
+                app_name,
+                Some(RestartContainerOptionsBuilder::default().build()),
+            )
             .await
         {
             eprintln!("docker: failed to restart {app_name}: {e}");
@@ -106,33 +122,48 @@ impl Scheduler {
     }
 
     pub async fn deploy(&self, pool: &PgPool, app_name: &str, image: &str, port: i32) {
-        if let Err(e) = self.docker.create_container(
-            Some(CreateContainerOptionsBuilder::default().name(app_name).build()),
-            ContainerCreateBody {
-                image: Some(image.to_string()),
-                ..Default::default()
-            }
-        ).await {
+        if let Err(e) = self
+            .docker
+            .create_container(
+                Some(
+                    CreateContainerOptionsBuilder::default()
+                        .name(app_name)
+                        .build(),
+                ),
+                ContainerCreateBody {
+                    image: Some(image.to_string()),
+                    ..Default::default()
+                },
+            )
+            .await
+        {
             eprintln!("docker: failed to create {app_name}: {e}");
             return;
         }
 
-        if let Err(e) = self.docker.start_container(
-            app_name,
-            Some(StartContainerOptionsBuilder::default().build()),
-        ).await {
+        if let Err(e) = self
+            .docker
+            .start_container(
+                app_name,
+                Some(StartContainerOptionsBuilder::default().build()),
+            )
+            .await
+        {
             eprintln!("docker: failed to start {app_name}: {e}");
             return;
         }
 
-        let container_id = self.docker
+        let container_id = self
+            .docker
             .inspect_container(app_name, None)
             .await
             .ok()
             .and_then(|info| info.id)
             .unwrap_or_default();
 
-        if let Err(e) = Registry::save(pool, app_name, image, &container_id, port, "running", None).await {
+        if let Err(e) =
+            Registry::save(pool, app_name, image, &container_id, port, "running", None).await
+        {
             eprintln!("registry: failed to save app {app_name}: {e}");
         }
     }

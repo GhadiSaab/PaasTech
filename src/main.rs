@@ -2,7 +2,7 @@ mod registry;
 mod scheduler;
 
 use actix_multipart::Multipart;
-use actix_web::{post, web, App, Error, HttpResponse, HttpServer, Responder};
+use actix_web::{App, Error, HttpResponse, HttpServer, Responder, post, web};
 use futures_util::TryStreamExt;
 use sqlx::PgPool;
 use std::path::Path;
@@ -31,7 +31,11 @@ async fn init() -> Config {
     let database_url = std::env::var("DATABASE_URL")
         .unwrap_or_else(|_| "postgres://paastech:paastech@localhost:5432/paastech".to_string());
 
-    Config { host, port, database_url }
+    Config {
+        host,
+        port,
+        database_url,
+    }
 }
 
 #[actix_web::main]
@@ -43,14 +47,14 @@ async fn main() -> std::io::Result<()> {
         .expect("Failed to connect to PostgreSQL");
 
     println!("Running on http://{}:{}", config.host, config.port);
-    HttpServer::new(move ||
+    HttpServer::new(move || {
         App::new()
             .app_data(web::Data::new(pool.clone()))
             .service(upload_app)
-    )
-        .bind((config.host, config.port))?
-        .run()
-        .await
+    })
+    .bind((config.host, config.port))?
+    .run()
+    .await
 }
 
 // routes
