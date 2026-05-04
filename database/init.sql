@@ -3,8 +3,8 @@ BEGIN;
 CREATE TABLE IF NOT EXISTS applications (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     name VARCHAR(50) NOT NULL,
-    image_id varchar(12) NULL,
-    container_id varchar(12) NULL,
+    image_id varchar(64) NULL,
+    container_id varchar(64) NULL,
     port INTEGER NULL,
     status VARCHAR(20) NOT NULL DEFAULT 'stopped',
     env JSONB NULL,
@@ -15,8 +15,8 @@ CREATE TABLE IF NOT EXISTS services (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     name VARCHAR(50) NOT NULL,
     version VARCHAR(12) NOT NULL,
-    image_id varchar(12) NULL,
-    container_id varchar(12) NULL,
+    image_id varchar(64) NULL,
+    container_id varchar(64) NULL,
     port INTEGER NULL,
     created_at TIMESTAMP NOT NULL DEFAULT now()
 );

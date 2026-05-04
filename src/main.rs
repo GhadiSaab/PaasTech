@@ -1,6 +1,10 @@
+mod registry;
+mod scheduler;
+
 use actix_multipart::Multipart;
-use actix_web::{App, Error, HttpResponse, HttpServer, Responder, post};
+use actix_web::{post, web, App, Error, HttpResponse, HttpServer, Responder};
 use futures_util::TryStreamExt;
+use sqlx::PgPool;
 use std::path::Path;
 use tokio::fs;
 use tokio::fs::File;
@@ -9,6 +13,7 @@ use tokio::io::AsyncWriteExt;
 struct Config {
     host: String,
     port: u16,
+    database_url: String,
 }
 
 async fn init() -> Config {
@@ -23,16 +28,26 @@ async fn init() -> Config {
         .unwrap_or_else(|_| "8080".to_string())
         .parse()
         .expect("PORT must be a valid number");
+    let database_url = std::env::var("DATABASE_URL")
+        .unwrap_or_else(|_| "postgres://paastech:paastech@localhost:5433/paastech".to_string());
 
-    Config { host, port }
+    Config { host, port, database_url }
 }
 
 #[actix_web::main]
 async fn main() -> std::io::Result<()> {
     let config: Config = init().await;
 
+    let pool = PgPool::connect(&config.database_url)
+        .await
+        .expect("Failed to connect to PostgreSQL");
+
     println!("Running on http://{}:{}", config.host, config.port);
-    HttpServer::new(|| App::new().service(upload_app))
+    HttpServer::new(move ||
+        App::new()
+            .app_data(web::Data::new(pool.clone()))
+            .service(upload_app)
+    )
         .bind((config.host, config.port))?
         .run()
         .await
