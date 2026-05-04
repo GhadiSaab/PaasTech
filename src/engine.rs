@@ -48,9 +48,9 @@ pub async fn extract_zip(source: PathBuf) -> Result<PathBuf, String> {
         zip_extract::extract(sync_file, &dest_for_closure, true)
             .map_err(|e| format!("Zip extraction error: {}", e))
     })
-        .await
-        .map_err(|e| format!("Thread pool error: {}", e))?
-        .map(|_| dest_path)
+    .await
+    .map_err(|e| format!("Thread pool error: {}", e))?
+    .map(|_| dest_path)
 }
 
 pub async fn launch_code(from: PathBuf) {
