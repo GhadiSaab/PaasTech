@@ -10,3 +10,7 @@ futures-util = "0.3"
 tokio = "1.52.1"
 bollard = "*"
 dotenvy = "0.15"
+serde = { version = "1", features = ["derive"] }
+
+[dev-dependencies]
+serde_json = "1"

@@ -1,10 +1,15 @@
+mod scheduler;
+
 use actix_multipart::Multipart;
-use actix_web::{post, App, Error, HttpResponse, HttpServer, Responder};
+use actix_web::{get, post, web, App, Error, HttpResponse, HttpServer, Responder};
 use futures_util::TryStreamExt;
+use serde::Deserialize;
 use std::path::Path;
 use tokio::fs;
 use tokio::fs::File;
 use tokio::io::AsyncWriteExt;
+
+use scheduler::Scheduler;
 
 struct Config {
     host: String,
@@ -28,11 +33,18 @@ async fn init() -> Config {
 #[actix_web::main]
 async fn main() -> std::io::Result<()> {
     let config: Config = init().await;
+    let scheduler = web::Data::new(Scheduler::new());
 
     println!("Running on http://{}:{}", config.host, config.port);
-    HttpServer::new(||
+    HttpServer::new(move ||
         App::new()
+            .app_data(scheduler.clone())
             .service(upload_app)
+            .service(list_apps)
+            .service(deploy_app)
+            .service(stop_app)
+            .service(restart_app)
+            .service(status_app)
     )
         .bind((config.host, config.port))?
         .run()
@@ -69,3 +81,56 @@ async fn upload_app(mut payload: Multipart) -> Result<impl Responder, Error> {
 
     Ok(HttpResponse::Ok().body("Zip file uploaded successfully!"))
 }
+
+#[get("/app/list")]
+async fn list_apps(scheduler: web::Data<Scheduler>) -> impl Responder {
+    let apps = scheduler.list().await;
+    HttpResponse::Ok().json(apps)
+}
+
+#[derive(Deserialize)]
+struct DeployBody {
+    image: String,
+}
+
+#[post("/app/deploy")]
+async fn deploy_app(
+    scheduler: web::Data<Scheduler>,
+    body: web::Json<DeployBody>,
+) -> impl Responder {
+    let container_id = scheduler.deploy(&body.image).await;
+    HttpResponse::Ok().body(container_id)
+}
+
+#[post("/app/{container_id}/stop")]
+async fn stop_app(
+    scheduler: web::Data<Scheduler>,
+    path: web::Path<String>,
+) -> impl Responder {
+    let container_id = path.into_inner();
+    scheduler.stop(&container_id).await;
+    HttpResponse::Ok().finish()
+}
+
+#[post("/app/{container_id}/restart")]
+async fn restart_app(
+    scheduler: web::Data<Scheduler>,
+    path: web::Path<String>,
+) -> impl Responder {
+    let container_id = path.into_inner();
+    scheduler.restart(&container_id).await;
+    HttpResponse::Ok().finish()
+}
+
+#[get("/app/{container_id}/status")]
+async fn status_app(
+    scheduler: web::Data<Scheduler>,
+    path: web::Path<String>,
+) -> impl Responder {
+    let container_id = path.into_inner();
+    let status = scheduler.status(&container_id).await;
+    HttpResponse::Ok().body(status)
+}
+
+#[cfg(test)]
+mod tests;

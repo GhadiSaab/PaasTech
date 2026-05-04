@@ -1,15 +1,24 @@
 use bollard::Docker;
 use bollard::models::{ContainerCreateBody, ContainerSummaryStateEnum};
 use bollard::query_parameters::{
-    CreateContainerOptionsBuilder, ListContainersOptionsBuilder,
+    CreateImageOptionsBuilder, ListContainersOptionsBuilder,
     RemoveContainerOptionsBuilder, RestartContainerOptionsBuilder,
     StartContainerOptionsBuilder, StopContainerOptionsBuilder,
 };
 use actix_web::rt::time::sleep;
+use futures_util::StreamExt;
+use serde::Serialize;
 use std::time::Duration;
 
 pub struct Scheduler {
     docker: Docker,
+}
+
+#[derive(Serialize)]
+pub struct ContainerInfo {
+    pub id: String,
+    pub image: String,
+    pub name: String,
 }
 
 impl Scheduler {
@@ -30,25 +39,28 @@ impl Scheduler {
             .unwrap();
     }
 
-    pub async fn inspect(&self, app_name: &str) -> String {
+    pub async fn status(&self, app_name: &str) -> String {
         let info = self.docker.inspect_container(app_name, None).await.unwrap();
-        let status = info
-            .state
+        info.state
             .and_then(|s| s.status)
             .map(|s| s.to_string())
-            .unwrap_or_else(|| "unknown".to_string());
-        status
+            .unwrap_or_else(|| "unknown".to_string())
     }
 
-    pub async fn list(&self) -> Vec<String> {
+    pub async fn list(&self) -> Vec<ContainerInfo> {
         self.docker
             .list_containers(Some(ListContainersOptionsBuilder::default().all(true).build()))
             .await
             .unwrap()
             .into_iter()
-            .filter_map(|c| c.names)
-            .flatten()
-            .map(|name| name.trim_start_matches('/').to_string())
+            .map(|c| ContainerInfo {
+                id: c.id.unwrap_or_default(),
+                image: c.image.unwrap_or_default(),
+                name: c.names
+                    .and_then(|names| names.into_iter().next())
+                    .map(|n| n.trim_start_matches('/').to_string())
+                    .unwrap_or_default(),
+            })
             .collect()
     }
 
@@ -89,9 +101,29 @@ impl Scheduler {
         }
     }
 
-    pub async fn deploy(&self, app_name: &str, image: &str) {
-        self.docker.create_container(
-            Some(CreateContainerOptionsBuilder::default().name(app_name).build()),
+    async fn pull(&self, image: &str) {
+        let image_with_tag = if image.contains(':') {
+            image.to_string()
+        } else {
+            format!("{image}:latest")
+        };
+
+        let mut stream = self.docker.create_image(
+            Some(CreateImageOptionsBuilder::default().from_image(&image_with_tag).build()),
+            None,
+            None,
+        );
+        while stream.next().await.is_some() {}
+    }
+
+    pub async fn deploy(&self, image: &str) -> String {
+        let image_exists = self.docker.inspect_image(image).await.is_ok();
+        if !image_exists {
+            self.pull(image).await;
+        }
+
+        let response = self.docker.create_container(
+            None::<bollard::query_parameters::CreateContainerOptions>,
             ContainerCreateBody {
                 image: Some(image.to_string()),
                 ..Default::default()
@@ -99,8 +131,10 @@ impl Scheduler {
         ).await.unwrap();
 
         self.docker.start_container(
-            app_name,
+            &response.id,
             Some(StartContainerOptionsBuilder::default().build()),
         ).await.unwrap();
+
+        response.id
     }
 }

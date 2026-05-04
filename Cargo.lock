@@ -11,6 +11,8 @@ dependencies = [
  "bollard",
  "dotenvy",
  "futures-util",
+ "serde",
+ "serde_json",
  "tokio",
 ]
 
