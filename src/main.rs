@@ -4,8 +4,9 @@ mod scheduler;
 
 use crate::engine::{extract_zip, launch_code, save_multipart_file};
 use actix_multipart::Multipart;
-use actix_web::{App, Error, HttpResponse, HttpServer, Responder, get, post, web};
-use serde::Deserialize;
+use actix_web::{App, Error, HttpResponse, HttpServer, Responder, delete, error, get, post, patch, web};
+use serde::{Deserialize, Serialize};
+use futures_util::TryStreamExt;
 use sqlx::PgPool;
 use tokio::fs;
 
@@ -65,10 +66,23 @@ async fn main() -> std::io::Result<()> {
             .service(stop_app)
             .service(restart_app)
             .service(status_app)
+            .service(create_resource)
+            .service(get_resources)
+            .service(update_resource)
+            .service(delete_resource)
     })
     .bind((config.host, config.port))?
     .run()
     .await
+}
+
+// structs
+#[derive(Serialize, Deserialize)]
+struct Resource {
+    display_name: String,
+    name: String,
+    version: String,
+    application_ids: Vec<String>,
 }
 
 // routes
@@ -203,3 +217,49 @@ async fn status_app(
 
 #[cfg(test)]
 mod tests;
+
+#[post("/app/resource")]
+async fn create_resource(mut payload: web::Payload) -> Result<impl Responder, Error> {
+    let mut body = web::BytesMut::new();
+    while let Ok(Some(chunk)) = payload.try_next().await {
+        if (body.len() + chunk.len()) > MAX_PAYLOAD_SIZE {
+            return Err(error::ErrorBadRequest("overflow"));
+        }
+        body.extend_from_slice(&chunk);
+    }
+
+    let resource: Resource = serde_json::from_slice::<Resource>(&body)?;
+    Ok(HttpResponse::Ok().json(resource))
+}
+
+#[patch("/app/resource")]
+async fn update_resource(mut _payload: web::Payload) -> Result<impl Responder, Error> {
+    // TODO update resource in database
+    Ok(HttpResponse::Ok().body("Resource successfully updated"))
+}
+
+#[get("/app/resource")]
+async fn get_resources(pool: web::Data<sqlx::PgPool>) -> Result<impl Responder, Error> {
+    let resources = sqlx::query_as!(
+        Resource,
+        r#"SELECT
+            s.display_name,
+            s.name,
+            s.version,
+            COALESCE(array_agg(aps.application_id::text) FILTER (WHERE aps.application_id IS NOT NULL), '{}') as "application_ids!: Vec<String>"
+        FROM services s
+        LEFT JOIN application_services aps ON s.id = aps.service_id
+        GROUP BY s.id, s.display_name, s.name, s.version"#
+    )
+    .fetch_all(pool.get_ref())
+    .await
+    .map_err(error::ErrorInternalServerError)?;
+
+    Ok(HttpResponse::Ok().json(resources))
+}
+
+#[delete("/app/resource")]
+async fn delete_resource(mut _payload: web::Payload) -> Result<impl Responder, Error> {
+    // TODO delete resource from database
+    Ok(HttpResponse::Ok().body("Resource successfully deleted"))
+}
