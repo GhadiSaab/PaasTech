@@ -29,7 +29,7 @@ async fn init() -> Config {
         .parse()
         .expect("PORT must be a valid number");
     let database_url = std::env::var("DATABASE_URL")
-        .unwrap_or_else(|_| "postgres://paastech:paastech@localhost:5433/paastech".to_string());
+        .unwrap_or_else(|_| "postgres://paastech:paastech@localhost:5432/paastech".to_string());
 
     Config { host, port, database_url }
 }
