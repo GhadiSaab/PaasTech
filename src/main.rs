@@ -1,20 +1,30 @@
 mod engine;
+mod docker;
+mod models;
 mod registry;
 mod scheduler;
 
 use crate::engine::{extract_zip, launch_code, save_multipart_file};
 use actix_multipart::Multipart;
 use actix_web::{
-    App, Error, HttpResponse, HttpServer, Responder, delete, error, get, patch, post, web,
+    App, Error, HttpResponse, HttpServer, Responder, delete, error, get, patch, post, put, web,
+};
+use docker::{
+    VALID_SERVICES, container_image_for_service, default_env_vars_for_service,
+    docker_image_for_service, fetch_service_versions, service_port_for_service,
+    validate_docker_tag,
 };
 use futures_util::TryStreamExt;
+use models::{CreateResourcePayload, Resource, UpdateResourcePayload};
 use reqwest::Client;
-use serde::{Deserialize, Serialize};
+use scheduler::Scheduler;
 use sqlx::PgPool;
+use std::collections::HashMap;
+use std::path::Path;
 use tokio::fs;
 use tokio::fs::File;
 use tokio::io::AsyncWriteExt;
-use utoipa::{OpenApi, ToSchema};
+use utoipa::OpenApi;
 use utoipa_swagger_ui::SwaggerUi;
 use uuid::Uuid;
 
@@ -103,6 +113,10 @@ async fn init() -> Config {
         get_resource,
         update_resource,
         delete_resource,
+        start_resource,
+        stop_resource,
+        get_resource_env,
+        update_resource_env,
     ),
     components(schemas(Resource, CreateResourcePayload, UpdateResourcePayload)),
     tags(
@@ -129,6 +143,7 @@ async fn main() -> std::io::Result<()> {
     let scheduler = web::Data::new(Scheduler::new());
 
     let http_client = Client::new();
+    let scheduler = Scheduler::new();
 
     println!("Running on http://{}:{}", config.host, config.port);
     println!(
@@ -139,6 +154,7 @@ async fn main() -> std::io::Result<()> {
         App::new()
             .app_data(web::Data::new(pool.clone()))
             .app_data(web::Data::new(http_client.clone()))
+            .app_data(web::Data::new(scheduler.clone()))
             .service(
                 SwaggerUi::new("/swagger-ui/{_:.*}")
                     .url("/api-docs/openapi.json", ApiDoc::openapi()),
@@ -156,35 +172,32 @@ async fn main() -> std::io::Result<()> {
             .service(get_resource)
             .service(update_resource)
             .service(delete_resource)
+            .service(start_resource)
+            .service(stop_resource)
+            .service(get_resource_env)
+            .service(update_resource_env)
     })
     .bind((config.host, config.port))?
     .run()
     .await
 }
 
-// structs
+async fn fetch_resource_env_vars(
+    pool: &PgPool,
+    service_id: uuid::Uuid,
+) -> Result<Vec<String>, Error> {
+    let rows = sqlx::query!(
+        "SELECT key, value FROM service_env_vars WHERE service_id = $1 ORDER BY key",
+        service_id
+    )
+    .fetch_all(pool)
+    .await
+    .map_err(error::ErrorInternalServerError)?;
 
-#[derive(Serialize, Deserialize, ToSchema)]
-struct Resource {
-    id: String,
-    display_name: String,
-    name: String,
-    version: String,
-    application_ids: Vec<String>,
-}
-
-#[derive(Deserialize, ToSchema)]
-struct CreateResourcePayload {
-    display_name: String,
-    name: String,
-    version: String,
-    application_id: Option<String>,
-}
-
-#[derive(Deserialize, ToSchema)]
-struct UpdateResourcePayload {
-    display_name: Option<String>,
-    version: Option<String>,
+    Ok(rows
+        .into_iter()
+        .map(|r| format!("{}={}", r.key, r.value))
+        .collect())
 }
 
 // routes
@@ -213,31 +226,7 @@ async fn get_service_versions(
         )));
     }
 
-    let docker_image = docker_image_for_service(&name);
-    let url = format!(
-        "https://hub.docker.com/v2/repositories/{}/tags/?page_size=50&ordering=last_updated",
-        docker_image
-    );
-
-    let resp = client
-        .get(&url)
-        .send()
-        .await
-        .map_err(|_| error::ErrorInternalServerError("Failed to reach Docker Hub"))?;
-
-    if !resp.status().is_success() {
-        return Err(error::ErrorInternalServerError(
-            "Failed to fetch versions from Docker Hub",
-        ));
-    }
-
-    let tags: DockerTagsResponse = resp
-        .json()
-        .await
-        .map_err(|_| error::ErrorInternalServerError("Failed to parse Docker Hub response"))?;
-
-    let versions: Vec<String> = tags.results.into_iter().map(|t| t.name).collect();
-
+    let versions = fetch_service_versions(&client, &name).await?;
     Ok(HttpResponse::Ok().json(versions))
 }
 
@@ -397,6 +386,7 @@ mod tests;
 async fn create_resource(
     pool: web::Data<PgPool>,
     client: web::Data<Client>,
+    scheduler: web::Data<Scheduler>,
     payload: web::Json<CreateResourcePayload>,
 ) -> Result<impl Responder, Error> {
     if !VALID_SERVICES.contains(&payload.name.as_str()) {
@@ -412,6 +402,11 @@ async fn create_resource(
 
     let id = Uuid::new_v4();
 
+    let mut tx = pool
+        .begin()
+        .await
+        .map_err(error::ErrorInternalServerError)?;
+
     sqlx::query!(
         "INSERT INTO services (id, display_name, name, version) VALUES ($1, $2, $3, $4)",
         id,
@@ -419,7 +414,7 @@ async fn create_resource(
         payload.name,
         payload.version,
     )
-    .execute(pool.get_ref())
+    .execute(&mut *tx)
     .await
     .map_err(error::ErrorInternalServerError)?;
 
@@ -433,16 +428,57 @@ async fn create_resource(
             app_uuid,
             id,
         )
-        .execute(pool.get_ref())
+        .execute(&mut *tx)
         .await
         .map_err(error::ErrorInternalServerError)?;
     }
+
+    let default_env = default_env_vars_for_service(&payload.name);
+    for (key, value) in &default_env {
+        sqlx::query!(
+            "INSERT INTO service_env_vars (service_id, key, value) VALUES ($1, $2, $3)",
+            id,
+            key,
+            value,
+        )
+        .execute(&mut *tx)
+        .await
+        .map_err(error::ErrorInternalServerError)?;
+    }
+
+    let image = format!(
+        "{}:{}",
+        container_image_for_service(&payload.name),
+        payload.version
+    );
+    let container_port = service_port_for_service(&payload.name);
+    let env_vars: Vec<String> = default_env
+        .iter()
+        .map(|(k, v)| format!("{k}={v}"))
+        .collect();
+    let (container_id, host_port) = scheduler
+        .start_service(&id.to_string(), &image, container_port, env_vars)
+        .await
+        .map_err(|e| error::ErrorInternalServerError(format!("Failed to start service: {e}")))?;
+
+    sqlx::query!(
+        "UPDATE services SET status = 'running', container_id = $1, port = $2 WHERE id = $3",
+        container_id,
+        host_port as i32,
+        id,
+    )
+    .execute(&mut *tx)
+    .await
+    .map_err(error::ErrorInternalServerError)?;
+
+    tx.commit().await.map_err(error::ErrorInternalServerError)?;
 
     Ok(HttpResponse::Created().json(Resource {
         id: id.to_string(),
         display_name: payload.display_name.clone(),
         name: payload.name.clone(),
         version: payload.version.clone(),
+        status: "running".to_string(),
         application_ids: payload
             .application_id
             .as_deref()
@@ -470,10 +506,11 @@ async fn get_resources(pool: web::Data<PgPool>) -> Result<impl Responder, Error>
             s.display_name,
             s.name,
             s.version,
+            s.status,
             COALESCE(array_agg(aps.application_id::text) FILTER (WHERE aps.application_id IS NOT NULL), '{}') as "application_ids!: Vec<String>"
         FROM services s
         LEFT JOIN application_services aps ON s.id = aps.service_id
-        GROUP BY s.id, s.display_name, s.name, s.version"#
+        GROUP BY s.id, s.display_name, s.name, s.version, s.status"#
     )
     .fetch_all(pool.get_ref())
     .await
@@ -508,11 +545,12 @@ async fn get_resource(
             s.display_name,
             s.name,
             s.version,
+            s.status,
             COALESCE(array_agg(aps.application_id::text) FILTER (WHERE aps.application_id IS NOT NULL), '{}') as "application_ids!: Vec<String>"
         FROM services s
         LEFT JOIN application_services aps ON s.id = aps.service_id
         WHERE s.id = $1
-        GROUP BY s.id, s.display_name, s.name, s.version"#,
+        GROUP BY s.id, s.display_name, s.name, s.version, s.status"#,
         uuid
     )
     .fetch_optional(pool.get_ref())
@@ -556,6 +594,12 @@ async fn update_resource(
         validate_docker_tag(&client, docker_image, version).await?;
     }
 
+    let mut tx = pool
+        .get_ref()
+        .begin()
+        .await
+        .map_err(error::ErrorInternalServerError)?;
+
     let result = sqlx::query!(
         r#"UPDATE services
         SET
@@ -566,7 +610,7 @@ async fn update_resource(
         payload.version,
         uuid,
     )
-    .execute(pool.get_ref())
+    .execute(&mut *tx)
     .await
     .map_err(error::ErrorInternalServerError)?;
 
@@ -574,7 +618,143 @@ async fn update_resource(
         return Err(error::ErrorNotFound("Resource not found"));
     }
 
+    if let Some(app_ids) = &payload.application_ids {
+        let app_uuids: Vec<Uuid> = app_ids
+            .iter()
+            .map(|s| {
+                Uuid::parse_str(s).map_err(|_| error::ErrorBadRequest("Invalid application_id"))
+            })
+            .collect::<Result<_, _>>()?;
+
+        sqlx::query!(
+            "DELETE FROM application_services WHERE service_id = $1",
+            uuid
+        )
+        .execute(&mut *tx)
+        .await
+        .map_err(error::ErrorInternalServerError)?;
+
+        for app_uuid in app_uuids {
+            sqlx::query!(
+                "INSERT INTO application_services (application_id, service_id) VALUES ($1, $2)",
+                app_uuid,
+                uuid,
+            )
+            .execute(&mut *tx)
+            .await
+            .map_err(error::ErrorInternalServerError)?;
+        }
+    }
+
+    tx.commit().await.map_err(error::ErrorInternalServerError)?;
+
     Ok(HttpResponse::Ok().body("Resource successfully updated"))
+}
+
+#[utoipa::path(
+    post,
+    path = "/resource/{id}/start",
+    params(("id" = String, Path, description = "Resource UUID")),
+    responses(
+        (status = 200, description = "Resource started"),
+        (status = 400, description = "Invalid UUID"),
+        (status = 404, description = "Resource not found"),
+        (status = 409, description = "Resource already running"),
+        (status = 500, description = "Internal server error"),
+    ),
+    tag = "resources"
+)]
+#[post("/resource/{id}/start")]
+async fn start_resource(
+    pool: web::Data<PgPool>,
+    scheduler: web::Data<Scheduler>,
+    id: web::Path<String>,
+) -> Result<impl Responder, Error> {
+    let uuid = Uuid::parse_str(&id).map_err(|_| error::ErrorBadRequest("Invalid resource id"))?;
+
+    let service = sqlx::query!(
+        "SELECT name, version, status FROM services WHERE id = $1",
+        uuid
+    )
+    .fetch_optional(pool.get_ref())
+    .await
+    .map_err(error::ErrorInternalServerError)?
+    .ok_or_else(|| error::ErrorNotFound("Resource not found"))?;
+
+    if service.status == "running" {
+        return Err(error::ErrorConflict("Resource is already running"));
+    }
+
+    let image = format!(
+        "{}:{}",
+        container_image_for_service(&service.name),
+        service.version
+    );
+    let container_port = service_port_for_service(&service.name);
+    let env_vars = fetch_resource_env_vars(pool.get_ref(), uuid).await?;
+    let (container_id, host_port) = scheduler
+        .start_service(&uuid.to_string(), &image, container_port, env_vars)
+        .await
+        .map_err(|e| error::ErrorInternalServerError(format!("Failed to start service: {e}")))?;
+
+    sqlx::query!(
+        "UPDATE services SET status = 'running', container_id = $1, port = $2 WHERE id = $3",
+        container_id,
+        host_port as i32,
+        uuid,
+    )
+    .execute(pool.get_ref())
+    .await
+    .map_err(error::ErrorInternalServerError)?;
+
+    Ok(HttpResponse::Ok().body("Resource started"))
+}
+
+#[utoipa::path(
+    post,
+    path = "/resource/{id}/stop",
+    params(("id" = String, Path, description = "Resource UUID")),
+    responses(
+        (status = 200, description = "Resource stopped"),
+        (status = 400, description = "Invalid UUID"),
+        (status = 404, description = "Resource not found"),
+        (status = 409, description = "Resource already stopped"),
+        (status = 500, description = "Internal server error"),
+    ),
+    tag = "resources"
+)]
+#[post("/resource/{id}/stop")]
+async fn stop_resource(
+    pool: web::Data<PgPool>,
+    scheduler: web::Data<Scheduler>,
+    id: web::Path<String>,
+) -> Result<impl Responder, Error> {
+    let uuid = Uuid::parse_str(&id).map_err(|_| error::ErrorBadRequest("Invalid resource id"))?;
+
+    let service = sqlx::query!("SELECT status FROM services WHERE id = $1", uuid)
+        .fetch_optional(pool.get_ref())
+        .await
+        .map_err(error::ErrorInternalServerError)?
+        .ok_or_else(|| error::ErrorNotFound("Resource not found"))?;
+
+    if service.status == "stopped" {
+        return Err(error::ErrorConflict("Resource is already stopped"));
+    }
+
+    scheduler
+        .stop_service(&uuid.to_string())
+        .await
+        .map_err(|e| error::ErrorInternalServerError(format!("Failed to stop service: {e}")))?;
+
+    sqlx::query!(
+        "UPDATE services SET status = 'stopped', container_id = NULL, port = NULL WHERE id = $1",
+        uuid,
+    )
+    .execute(pool.get_ref())
+    .await
+    .map_err(error::ErrorInternalServerError)?;
+
+    Ok(HttpResponse::Ok().body("Resource stopped"))
 }
 
 #[utoipa::path(
@@ -606,4 +786,100 @@ async fn delete_resource(
     }
 
     Ok(HttpResponse::NoContent().finish())
+}
+
+#[utoipa::path(
+    get,
+    path = "/resource/{id}/env",
+    params(("id" = String, Path, description = "Resource UUID")),
+    responses(
+        (status = 200, description = "Environment variables as key-value map"),
+        (status = 400, description = "Invalid UUID"),
+        (status = 404, description = "Resource not found"),
+        (status = 500, description = "Internal server error"),
+    ),
+    tag = "resources"
+)]
+#[get("/resource/{id}/env")]
+async fn get_resource_env(
+    pool: web::Data<PgPool>,
+    id: web::Path<String>,
+) -> Result<impl Responder, Error> {
+    let uuid = Uuid::parse_str(&id).map_err(|_| error::ErrorBadRequest("Invalid resource id"))?;
+
+    sqlx::query!("SELECT id FROM services WHERE id = $1", uuid)
+        .fetch_optional(pool.get_ref())
+        .await
+        .map_err(error::ErrorInternalServerError)?
+        .ok_or_else(|| error::ErrorNotFound("Resource not found"))?;
+
+    let rows = sqlx::query!(
+        "SELECT key, value FROM service_env_vars WHERE service_id = $1 ORDER BY key",
+        uuid
+    )
+    .fetch_all(pool.get_ref())
+    .await
+    .map_err(error::ErrorInternalServerError)?;
+
+    let env_map: HashMap<String, String> = rows.into_iter().map(|r| (r.key, r.value)).collect();
+
+    Ok(HttpResponse::Ok().json(env_map))
+}
+
+#[utoipa::path(
+    put,
+    path = "/resource/{id}/env",
+    params(("id" = String, Path, description = "Resource UUID")),
+    request_body(
+        content_type = "application/json",
+        description = "Environment variables as key-value map (replaces all existing variables)"
+    ),
+    responses(
+        (status = 200, description = "Environment variables updated — restart resource to apply"),
+        (status = 400, description = "Invalid UUID"),
+        (status = 404, description = "Resource not found"),
+        (status = 500, description = "Internal server error"),
+    ),
+    tag = "resources"
+)]
+#[put("/resource/{id}/env")]
+async fn update_resource_env(
+    pool: web::Data<PgPool>,
+    id: web::Path<String>,
+    payload: web::Json<HashMap<String, String>>,
+) -> Result<impl Responder, Error> {
+    let uuid = Uuid::parse_str(&id).map_err(|_| error::ErrorBadRequest("Invalid resource id"))?;
+
+    sqlx::query!("SELECT id FROM services WHERE id = $1", uuid)
+        .fetch_optional(pool.get_ref())
+        .await
+        .map_err(error::ErrorInternalServerError)?
+        .ok_or_else(|| error::ErrorNotFound("Resource not found"))?;
+
+    let mut tx = pool
+        .begin()
+        .await
+        .map_err(error::ErrorInternalServerError)?;
+
+    sqlx::query!("DELETE FROM service_env_vars WHERE service_id = $1", uuid)
+        .execute(&mut *tx)
+        .await
+        .map_err(error::ErrorInternalServerError)?;
+
+    for (key, value) in payload.iter() {
+        sqlx::query!(
+            "INSERT INTO service_env_vars (service_id, key, value) VALUES ($1, $2, $3)",
+            uuid,
+            key,
+            value,
+        )
+        .execute(&mut *tx)
+        .await
+        .map_err(error::ErrorInternalServerError)?;
+    }
+
+    tx.commit().await.map_err(error::ErrorInternalServerError)?;
+
+    Ok(HttpResponse::Ok()
+        .body("Environment variables updated. Restart the resource to apply changes."))
 }

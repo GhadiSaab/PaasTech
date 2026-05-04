@@ -1,6 +1,6 @@
 use actix_web::rt::time::sleep;
 use bollard::Docker;
-use bollard::models::ContainerCreateBody;
+use bollard::models::{ContainerCreateBody, HostConfig, PortBinding};
 use bollard::query_parameters::{
     CreateContainerOptionsBuilder, CreateImageOptionsBuilder, ListContainersOptionsBuilder,
     RemoveContainerOptionsBuilder, RestartContainerOptionsBuilder, StartContainerOptionsBuilder,
@@ -8,12 +8,19 @@ use bollard::query_parameters::{
 };
 use futures_util::StreamExt;
 use serde::Serialize;
+use futures_util::TryStreamExt;
 use sqlx::PgPool;
+use std::collections::HashMap;
 use std::time::Duration;
 
 use crate::registry::Registry;
 
-#[allow(dead_code)]
+fn find_free_port() -> Result<u16, std::io::Error> {
+    let listener = std::net::TcpListener::bind("0.0.0.0:0")?;
+    Ok(listener.local_addr()?.port())
+}
+
+#[derive(Clone)]
 pub struct Scheduler {
     docker: Docker,
 }
@@ -158,6 +165,99 @@ impl Scheduler {
             self.pull(image).await;
         }
 
+    pub async fn start_service(
+        &self,
+        service_id: &str,
+        image: &str,
+        container_port: u16,
+        env_vars: Vec<String>,
+    ) -> Result<(String, u16), Box<dyn std::error::Error + Send + Sync>> {
+        self.docker
+            .create_image(
+                Some(
+                    CreateImageOptionsBuilder::default()
+                        .from_image(image)
+                        .build(),
+                ),
+                None,
+                None,
+            )
+            .try_collect::<Vec<_>>()
+            .await?;
+
+        let host_port = find_free_port()?;
+
+        let port_key = format!("{}/tcp", container_port);
+        let mut port_bindings: HashMap<String, Option<Vec<PortBinding>>> = HashMap::new();
+        port_bindings.insert(
+            port_key.clone(),
+            Some(vec![PortBinding {
+                host_ip: Some("0.0.0.0".to_string()),
+                host_port: Some(host_port.to_string()),
+            }]),
+        );
+
+        self.docker
+            .create_container(
+                Some(
+                    CreateContainerOptionsBuilder::default()
+                        .name(service_id)
+                        .build(),
+                ),
+                ContainerCreateBody {
+                    image: Some(image.to_string()),
+                    env: if env_vars.is_empty() {
+                        None
+                    } else {
+                        Some(env_vars)
+                    },
+                    exposed_ports: Some(vec![port_key]),
+                    host_config: Some(HostConfig {
+                        port_bindings: Some(port_bindings),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                },
+            )
+            .await?;
+
+        self.docker
+            .start_container(
+                service_id,
+                Some(StartContainerOptionsBuilder::default().build()),
+            )
+            .await?;
+
+        let container_id = self
+            .docker
+            .inspect_container(service_id, None)
+            .await
+            .ok()
+            .and_then(|info| info.id)
+            .unwrap_or_default();
+
+        Ok((container_id, host_port))
+    }
+
+    pub async fn stop_service(&self, service_id: &str) -> Result<(), bollard::errors::Error> {
+        self.docker
+            .stop_container(
+                service_id,
+                Some(StopContainerOptionsBuilder::default().build()),
+            )
+            .await?;
+
+        self.docker
+            .remove_container(
+                service_id,
+                Some(RemoveContainerOptionsBuilder::default().build()),
+            )
+            .await?;
+
+        Ok(())
+    }
+
+    pub async fn deploy(&self, pool: &PgPool, app_name: &str, image: &str, port: i32) {
         if let Err(e) = self
             .docker
             .create_container(
