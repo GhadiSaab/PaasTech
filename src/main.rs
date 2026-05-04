@@ -124,7 +124,17 @@ async fn deploy_app(
         Some(id) => id,
         None => return HttpResponse::InternalServerError().finish(),
     };
-    match Registry::save(&pool, &body.name, &body.image, &container_id, body.port, "running", None).await {
+    match Registry::save(
+        &pool,
+        &body.name,
+        &body.image,
+        &container_id,
+        body.port,
+        "running",
+        None,
+    )
+    .await
+    {
         Ok(_) => HttpResponse::Ok().finish(),
         Err(e) => {
             eprintln!("registry: failed to save app {}: {e}", body.name);

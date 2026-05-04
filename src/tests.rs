@@ -1,6 +1,6 @@
 use super::*;
-use actix_web::test;
 use crate::registry::Registry;
+use actix_web::test;
 use serde_json::json;
 use sqlx::PgPool;
 
@@ -70,9 +70,17 @@ async fn test_stop_app() {
     let app_name = "test-stop-app";
 
     if let Some(container_id) = scheduler.deploy(app_name, "hello-world").await {
-        Registry::save(&pool, app_name, "hello-world", &container_id, 8081, "running", None)
-            .await
-            .ok();
+        Registry::save(
+            &pool,
+            app_name,
+            "hello-world",
+            &container_id,
+            8081,
+            "running",
+            None,
+        )
+        .await
+        .ok();
     }
 
     let app = test::init_service(
@@ -97,9 +105,17 @@ async fn test_restart_app() {
     let app_name = "test-restart-app";
 
     if let Some(container_id) = scheduler.deploy(app_name, "hello-world").await {
-        Registry::save(&pool, app_name, "hello-world", &container_id, 8082, "running", None)
-            .await
-            .ok();
+        Registry::save(
+            &pool,
+            app_name,
+            "hello-world",
+            &container_id,
+            8082,
+            "running",
+            None,
+        )
+        .await
+        .ok();
     }
 
     let app = test::init_service(
@@ -130,9 +146,17 @@ async fn test_status_app() {
     let app_name = "test-status-app";
 
     if let Some(container_id) = scheduler.deploy(app_name, "hello-world").await {
-        Registry::save(&pool, app_name, "hello-world", &container_id, 8083, "running", None)
-            .await
-            .ok();
+        Registry::save(
+            &pool,
+            app_name,
+            "hello-world",
+            &container_id,
+            8083,
+            "running",
+            None,
+        )
+        .await
+        .ok();
     }
 
     let app = test::init_service(
