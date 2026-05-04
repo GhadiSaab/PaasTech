@@ -1,5 +1,5 @@
 use actix_multipart::Multipart;
-use actix_web::{post, App, Error, HttpResponse, HttpServer, Responder};
+use actix_web::{App, Error, HttpResponse, HttpServer, Responder, post};
 use futures_util::TryStreamExt;
 use std::path::Path;
 use tokio::fs;
@@ -12,7 +12,9 @@ struct Config {
 }
 
 async fn init() -> Config {
-    fs::create_dir_all("uploads").await.expect("Folder creation failed.");
+    fs::create_dir_all("uploads")
+        .await
+        .expect("Folder creation failed.");
 
     dotenvy::dotenv().ok();
 
@@ -30,10 +32,7 @@ async fn main() -> std::io::Result<()> {
     let config: Config = init().await;
 
     println!("Running on http://{}:{}", config.host, config.port);
-    HttpServer::new(||
-        App::new()
-            .service(upload_app)
-    )
+    HttpServer::new(|| App::new().service(upload_app))
         .bind((config.host, config.port))?
         .run()
         .await
@@ -44,15 +43,11 @@ async fn main() -> std::io::Result<()> {
 #[post("/app/upload")]
 async fn upload_app(mut payload: Multipart) -> Result<impl Responder, Error> {
     while let Ok(Some(mut field)) = payload.try_next().await {
-        let filename: &str;
-
-        match field.content_disposition() {
-            Some(content) => {
-                filename = match content.get_filename() {
-                    Some(name) => name,
-                    None => continue,
-                };
-            }
+        let filename: &str = match field.content_disposition() {
+            Some(content) => match content.get_filename() {
+                Some(name) => name,
+                None => continue,
+            },
             None => continue,
         };
 
