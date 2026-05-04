@@ -1,0 +1,6 @@
+
+test:
+  extends: .rust-base
+  stage: test
+  script:
+    - cargo test
