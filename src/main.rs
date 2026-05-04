@@ -76,5 +76,5 @@ async fn upload_app(payload: Multipart) -> Result<impl Responder, Error> {
 
     launch_code(extracted_folder).await;
 
-    Ok(HttpResponse::Ok().body("risen\n"))
+    Ok(HttpResponse::Ok().body("worked\n"))
 }
