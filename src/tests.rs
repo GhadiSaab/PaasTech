@@ -1,9 +1,20 @@
 use super::*;
 use actix_web::test;
 use serde_json::json;
+use sqlx::PgPool;
 
 fn build_scheduler() -> web::Data<Scheduler> {
     web::Data::new(Scheduler::new())
+}
+
+async fn build_pool() -> web::Data<PgPool> {
+    let url = std::env::var("DATABASE_URL")
+        .unwrap_or_else(|_| "postgres://paastech:paastech@localhost:5432/paastech".to_string());
+    web::Data::new(
+        PgPool::connect(&url)
+            .await
+            .expect("Failed to connect to test DB"),
+    )
 }
 
 #[actix_web::test]
@@ -16,11 +27,15 @@ async fn test_list_apps() {
 }
 
 #[actix_web::test]
-async fn test_deploy_returns_container_id() {
+async fn test_deploy_app() {
     let scheduler = build_scheduler();
+    let pool = build_pool().await;
+    let app_name = "test-deploy-app";
+
     let app = test::init_service(
         App::new()
             .app_data(scheduler.clone())
+            .app_data(pool.clone())
             .service(deploy_app)
             .service(stop_app),
     )
@@ -28,17 +43,13 @@ async fn test_deploy_returns_container_id() {
 
     let req = test::TestRequest::post()
         .uri("/app/deploy")
-        .set_json(json!({"container_id": "", "image": "hello-world"}))
+        .set_json(json!({"name": app_name, "image": "hello-world", "port": 8080}))
         .to_request();
     let resp = test::call_service(&app, req).await;
     assert_eq!(resp.status(), 200);
 
-    let body = test::read_body(resp).await;
-    let container_id = String::from_utf8(body.to_vec()).unwrap();
-    assert!(!container_id.is_empty());
-
     let req = test::TestRequest::post()
-        .uri(&format!("/app/{}/stop", container_id))
+        .uri(&format!("/app/{}/stop", app_name))
         .to_request();
     test::call_service(&app, req).await;
 }
@@ -46,12 +57,21 @@ async fn test_deploy_returns_container_id() {
 #[actix_web::test]
 async fn test_stop_app() {
     let scheduler = build_scheduler();
-    let container_id = scheduler.deploy("hello-world").await;
+    let pool = build_pool().await;
+    let app_name = "test-stop-app";
 
-    let app = test::init_service(App::new().app_data(scheduler).service(stop_app)).await;
+    scheduler.deploy(&pool, app_name, "hello-world", 8081).await;
+
+    let app = test::init_service(
+        App::new()
+            .app_data(scheduler)
+            .app_data(pool)
+            .service(stop_app),
+    )
+    .await;
 
     let req = test::TestRequest::post()
-        .uri(&format!("/app/{}/stop", container_id))
+        .uri(&format!("/app/{}/stop", app_name))
         .to_request();
     let resp = test::call_service(&app, req).await;
     assert_eq!(resp.status(), 200);
@@ -60,24 +80,28 @@ async fn test_stop_app() {
 #[actix_web::test]
 async fn test_restart_app() {
     let scheduler = build_scheduler();
-    let container_id = scheduler.deploy("hello-world").await;
+    let pool = build_pool().await;
+    let app_name = "test-restart-app";
+
+    scheduler.deploy(&pool, app_name, "hello-world", 8082).await;
 
     let app = test::init_service(
         App::new()
             .app_data(scheduler.clone())
+            .app_data(pool.clone())
             .service(restart_app)
             .service(stop_app),
     )
     .await;
 
     let req = test::TestRequest::post()
-        .uri(&format!("/app/{}/restart", container_id))
+        .uri(&format!("/app/{}/restart", app_name))
         .to_request();
     let resp = test::call_service(&app, req).await;
     assert_eq!(resp.status(), 200);
 
     let req = test::TestRequest::post()
-        .uri(&format!("/app/{}/stop", container_id))
+        .uri(&format!("/app/{}/stop", app_name))
         .to_request();
     test::call_service(&app, req).await;
 }
@@ -85,18 +109,22 @@ async fn test_restart_app() {
 #[actix_web::test]
 async fn test_status_app() {
     let scheduler = build_scheduler();
-    let container_id = scheduler.deploy("hello-world").await;
+    let pool = build_pool().await;
+    let app_name = "test-status-app";
+
+    scheduler.deploy(&pool, app_name, "hello-world", 8083).await;
 
     let app = test::init_service(
         App::new()
             .app_data(scheduler.clone())
+            .app_data(pool.clone())
             .service(status_app)
             .service(stop_app),
     )
     .await;
 
     let req = test::TestRequest::get()
-        .uri(&format!("/app/{}/status", container_id))
+        .uri(&format!("/app/{}/status", app_name))
         .to_request();
     let resp = test::call_service(&app, req).await;
     assert_eq!(resp.status(), 200);
@@ -106,7 +134,7 @@ async fn test_status_app() {
     assert!(!status.is_empty());
 
     let req = test::TestRequest::post()
-        .uri(&format!("/app/{}/stop", container_id))
+        .uri(&format!("/app/{}/stop", app_name))
         .to_request();
     test::call_service(&app, req).await;
 }

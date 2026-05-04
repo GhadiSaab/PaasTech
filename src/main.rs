@@ -1,9 +1,11 @@
+mod registry;
 mod scheduler;
 
 use actix_multipart::Multipart;
 use actix_web::{App, Error, HttpResponse, HttpServer, Responder, get, post, web};
 use futures_util::TryStreamExt;
 use serde::Deserialize;
+use sqlx::PgPool;
 use std::path::Path;
 use tokio::fs;
 use tokio::fs::File;
@@ -14,6 +16,7 @@ use scheduler::Scheduler;
 struct Config {
     host: String,
     port: u16,
+    database_url: String,
 }
 
 async fn init() -> Config {
@@ -21,25 +24,37 @@ async fn init() -> Config {
         .await
         .expect("Folder creation failed.");
 
-    dotenvy::dotenv().ok();
-
     let host = std::env::var("HOST").unwrap_or_else(|_| "127.0.0.1".to_string());
     let port = std::env::var("PORT")
         .unwrap_or_else(|_| "8080".to_string())
         .parse()
         .expect("PORT must be a valid number");
+    let database_url = std::env::var("DATABASE_URL")
+        .unwrap_or_else(|_| "postgres://paastech:paastech@localhost:5432/paastech".to_string());
 
-    Config { host, port }
+    Config {
+        host,
+        port,
+        database_url,
+    }
 }
 
 #[actix_web::main]
 async fn main() -> std::io::Result<()> {
+    dotenvy::dotenv().ok();
+
     let config: Config = init().await;
+
+    let pool = PgPool::connect(&config.database_url)
+        .await
+        .expect("Failed to connect to PostgreSQL");
+
     let scheduler = web::Data::new(Scheduler::new());
 
     println!("Running on http://{}:{}", config.host, config.port);
     HttpServer::new(move || {
         App::new()
+            .app_data(web::Data::new(pool.clone()))
             .app_data(scheduler.clone())
             .service(upload_app)
             .service(list_apps)
@@ -88,36 +103,43 @@ async fn list_apps(scheduler: web::Data<Scheduler>) -> impl Responder {
 
 #[derive(Deserialize)]
 struct DeployBody {
+    name: String,
     image: String,
+    port: i32,
 }
 
 #[post("/app/deploy")]
 async fn deploy_app(
     scheduler: web::Data<Scheduler>,
+    pool: web::Data<PgPool>,
     body: web::Json<DeployBody>,
 ) -> impl Responder {
-    let container_id = scheduler.deploy(&body.image).await;
-    HttpResponse::Ok().body(container_id)
-}
-
-#[post("/app/{container_id}/stop")]
-async fn stop_app(scheduler: web::Data<Scheduler>, path: web::Path<String>) -> impl Responder {
-    let container_id = path.into_inner();
-    scheduler.stop(&container_id).await;
+    scheduler.deploy(&pool, &body.name, &body.image, body.port).await;
     HttpResponse::Ok().finish()
 }
 
-#[post("/app/{container_id}/restart")]
+#[post("/app/{app_name}/stop")]
+async fn stop_app(
+    scheduler: web::Data<Scheduler>,
+    pool: web::Data<PgPool>,
+    path: web::Path<String>,
+) -> impl Responder {
+    let app_name = path.into_inner();
+    scheduler.stop(&pool, &app_name).await;
+    HttpResponse::Ok().finish()
+}
+
+#[post("/app/{app_name}/restart")]
 async fn restart_app(scheduler: web::Data<Scheduler>, path: web::Path<String>) -> impl Responder {
-    let container_id = path.into_inner();
-    scheduler.restart(&container_id).await;
+    let app_name = path.into_inner();
+    scheduler.restart(&app_name).await;
     HttpResponse::Ok().finish()
 }
 
-#[get("/app/{container_id}/status")]
+#[get("/app/{app_name}/status")]
 async fn status_app(scheduler: web::Data<Scheduler>, path: web::Path<String>) -> impl Responder {
-    let container_id = path.into_inner();
-    let status = scheduler.status(&container_id).await;
+    let app_name = path.into_inner();
+    let status = scheduler.inspect(&app_name).await;
     HttpResponse::Ok().body(status)
 }
 
