@@ -4,6 +4,8 @@ CREATE TABLE IF NOT EXISTS applications (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     name VARCHAR(50) NOT NULL,
     image_id varchar(12) NULL,
+    container_id varchar(12) NULL,
+    port INTEGER NULL,
     created_at TIMESTAMP NOT NULL DEFAULT now()
 );
 
@@ -12,6 +14,8 @@ CREATE TABLE IF NOT EXISTS services (
     name VARCHAR(50) NOT NULL,
     version VARCHAR(12) NOT NULL,
     image_id varchar(12) NULL,
+    container_id varchar(12) NULL,
+    port INTEGER NULL,
     created_at TIMESTAMP NOT NULL DEFAULT now()
 );
 
