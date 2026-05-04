@@ -10,7 +10,7 @@ fn build_scheduler() -> web::Data<Scheduler> {
 async fn test_list_apps() {
     let app = test::init_service(App::new().app_data(build_scheduler()).service(list_apps)).await;
 
-    let req = test::TestRequest::get().uri("/app/list").to_request();
+    let req = test::TestRequest::get().uri("/app").to_request();
     let resp = test::call_service(&app, req).await;
     assert_eq!(resp.status(), 200);
 }

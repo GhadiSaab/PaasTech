@@ -80,7 +80,7 @@ async fn upload_app(mut payload: Multipart) -> Result<impl Responder, Error> {
     Ok(HttpResponse::Ok().body("Zip file uploaded successfully!"))
 }
 
-#[get("/app/list")]
+#[get("/app")]
 async fn list_apps(scheduler: web::Data<Scheduler>) -> impl Responder {
     let apps = scheduler.list().await;
     HttpResponse::Ok().json(apps)
