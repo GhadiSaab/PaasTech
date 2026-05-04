@@ -6,6 +6,8 @@ CREATE TABLE IF NOT EXISTS applications (
     image_id varchar(12) NULL,
     container_id varchar(12) NULL,
     port INTEGER NULL,
+    status VARCHAR(20) NOT NULL DEFAULT 'stopped',
+    env JSONB NULL,
     created_at TIMESTAMP NOT NULL DEFAULT now()
 );
 
