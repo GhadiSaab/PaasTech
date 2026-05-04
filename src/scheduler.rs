@@ -33,7 +33,7 @@ impl Scheduler {
         Self { docker }
     }
 
-    pub async fn stop(&self, pool: &PgPool, app_name: &str) {
+    pub async fn stop(&self, app_name: &str) {
         if let Err(e) = self
             .docker
             .stop_container(
@@ -54,10 +54,6 @@ impl Scheduler {
             .await
         {
             eprintln!("docker: failed to remove {app_name}: {e}");
-        }
-
-        if let Err(e) = Registry::update_status(pool, app_name, "stopped").await {
-            eprintln!("registry: failed to update status for {app_name}: {e}");
         }
     }
 
@@ -156,7 +152,7 @@ impl Scheduler {
         while stream.next().await.is_some() {}
     }
 
-    pub async fn deploy(&self, pool: &PgPool, app_name: &str, image: &str, port: i32) {
+    pub async fn deploy(&self, app_name: &str, image: &str) -> Option<String> {
         let image_exists = self.docker.inspect_image(image).await.is_ok();
         if !image_exists {
             self.pull(image).await;
@@ -178,7 +174,7 @@ impl Scheduler {
             .await
         {
             eprintln!("docker: failed to create {app_name}: {e}");
-            return;
+            return None;
         }
 
         if let Err(e) = self
@@ -190,7 +186,7 @@ impl Scheduler {
             .await
         {
             eprintln!("docker: failed to start {app_name}: {e}");
-            return;
+            return None;
         }
 
         let container_id = self
@@ -201,10 +197,6 @@ impl Scheduler {
             .and_then(|info| info.id)
             .unwrap_or_default();
 
-        if let Err(e) =
-            Registry::save(pool, app_name, image, &container_id, port, "running", None).await
-        {
-            eprintln!("registry: failed to save app {app_name}: {e}");
-        }
+        Some(container_id)
     }
 }

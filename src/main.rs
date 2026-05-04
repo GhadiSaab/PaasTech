@@ -11,6 +11,7 @@ use tokio::fs;
 use tokio::fs::File;
 use tokio::io::AsyncWriteExt;
 
+use registry::Registry;
 use scheduler::Scheduler;
 
 struct Config {
@@ -96,9 +97,14 @@ async fn upload_app(mut payload: Multipart) -> Result<impl Responder, Error> {
 }
 
 #[get("/app")]
-async fn list_apps(scheduler: web::Data<Scheduler>) -> impl Responder {
-    let apps = scheduler.list().await;
-    HttpResponse::Ok().json(apps)
+async fn list_apps(pool: web::Data<PgPool>) -> impl Responder {
+    match Registry::list(&pool).await {
+        Ok(apps) => HttpResponse::Ok().json(apps),
+        Err(e) => {
+            eprintln!("registry: list_apps failed: {e}");
+            HttpResponse::InternalServerError().finish()
+        }
+    }
 }
 
 #[derive(Deserialize)]
@@ -114,8 +120,17 @@ async fn deploy_app(
     pool: web::Data<PgPool>,
     body: web::Json<DeployBody>,
 ) -> impl Responder {
-    scheduler.deploy(&pool, &body.name, &body.image, body.port).await;
-    HttpResponse::Ok().finish()
+    let container_id = match scheduler.deploy(&body.name, &body.image).await {
+        Some(id) => id,
+        None => return HttpResponse::InternalServerError().finish(),
+    };
+    match Registry::save(&pool, &body.name, &body.image, &container_id, body.port, "running", None).await {
+        Ok(_) => HttpResponse::Ok().finish(),
+        Err(e) => {
+            eprintln!("registry: failed to save app {}: {e}", body.name);
+            HttpResponse::InternalServerError().finish()
+        }
+    }
 }
 
 #[post("/app/{app_name}/stop")]
@@ -125,20 +140,58 @@ async fn stop_app(
     path: web::Path<String>,
 ) -> impl Responder {
     let app_name = path.into_inner();
-    scheduler.stop(&pool, &app_name).await;
+    match Registry::get(&pool, &app_name).await {
+        Ok(Some(_)) => {}
+        Ok(None) => return HttpResponse::NotFound().finish(),
+        Err(e) => {
+            eprintln!("registry: get failed for {app_name}: {e}");
+            return HttpResponse::InternalServerError().finish();
+        }
+    }
+    scheduler.stop(&app_name).await;
+    if let Err(e) = Registry::update_status(&pool, &app_name, "stopped").await {
+        eprintln!("registry: failed to update status for {app_name}: {e}");
+    }
     HttpResponse::Ok().finish()
 }
 
 #[post("/app/{app_name}/restart")]
-async fn restart_app(scheduler: web::Data<Scheduler>, path: web::Path<String>) -> impl Responder {
+async fn restart_app(
+    scheduler: web::Data<Scheduler>,
+    pool: web::Data<PgPool>,
+    path: web::Path<String>,
+) -> impl Responder {
     let app_name = path.into_inner();
+    match Registry::get(&pool, &app_name).await {
+        Ok(Some(_)) => {}
+        Ok(None) => return HttpResponse::NotFound().finish(),
+        Err(e) => {
+            eprintln!("registry: get failed for {app_name}: {e}");
+            return HttpResponse::InternalServerError().finish();
+        }
+    }
     scheduler.restart(&app_name).await;
+    if let Err(e) = Registry::update_status(&pool, &app_name, "running").await {
+        eprintln!("registry: failed to update status for {app_name}: {e}");
+    }
     HttpResponse::Ok().finish()
 }
 
 #[get("/app/{app_name}/status")]
-async fn status_app(scheduler: web::Data<Scheduler>, path: web::Path<String>) -> impl Responder {
+async fn status_app(
+    scheduler: web::Data<Scheduler>,
+    pool: web::Data<PgPool>,
+    path: web::Path<String>,
+) -> impl Responder {
     let app_name = path.into_inner();
+    match Registry::get(&pool, &app_name).await {
+        Ok(Some(_)) => {}
+        Ok(None) => return HttpResponse::NotFound().finish(),
+        Err(e) => {
+            eprintln!("registry: get failed for {app_name}: {e}");
+            return HttpResponse::InternalServerError().finish();
+        }
+    }
     let status = scheduler.inspect(&app_name).await;
     HttpResponse::Ok().body(status)
 }
