@@ -1,6 +1,7 @@
 use actix_web::{Error, error};
 use reqwest::Client;
 use serde::Deserialize;
+use uuid::Uuid;
 
 pub const VALID_SERVICES: &[&str] = &["postgres", "redis", "s3"];
 
@@ -29,7 +30,21 @@ pub fn default_env_vars_for_service(name: &str) -> Vec<(String, String)> {
             ("POSTGRES_PASSWORD".to_string(), "postgres".to_string()),
             ("POSTGRES_DB".to_string(), "postgres".to_string()),
         ],
-        "redis" | "s3" => vec![],
+        "redis" => vec![("REDIS_PASSWORD".to_string(), "redis".to_string())],
+        "s3" => vec![
+            (
+                "GARAGE_RPC_SECRET".to_string(),
+                format!("{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple()),
+            ),
+            (
+                "GARAGE_METADATA_DIR".to_string(),
+                "/var/lib/garage/meta".to_string(),
+            ),
+            (
+                "GARAGE_DATA_DIR".to_string(),
+                "/var/lib/garage/data".to_string(),
+            ),
+        ],
         _ => unreachable!(),
     }
 }
