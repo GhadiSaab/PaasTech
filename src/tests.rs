@@ -8,12 +8,7 @@ fn build_scheduler() -> web::Data<Scheduler> {
 
 #[actix_web::test]
 async fn test_list_apps() {
-    let app = test::init_service(
-        App::new()
-            .app_data(build_scheduler())
-            .service(list_apps),
-    )
-    .await;
+    let app = test::init_service(App::new().app_data(build_scheduler()).service(list_apps)).await;
 
     let req = test::TestRequest::get().uri("/app/list").to_request();
     let resp = test::call_service(&app, req).await;
@@ -53,12 +48,7 @@ async fn test_stop_app() {
     let scheduler = build_scheduler();
     let container_id = scheduler.deploy("hello-world").await;
 
-    let app = test::init_service(
-        App::new()
-            .app_data(scheduler)
-            .service(stop_app),
-    )
-    .await;
+    let app = test::init_service(App::new().app_data(scheduler).service(stop_app)).await;
 
     let req = test::TestRequest::post()
         .uri(&format!("/app/{}/stop", container_id))

@@ -1,11 +1,10 @@
+use actix_web::rt::time::sleep;
 use bollard::Docker;
 use bollard::models::{ContainerCreateBody, ContainerSummaryStateEnum};
 use bollard::query_parameters::{
-    CreateImageOptionsBuilder, ListContainersOptionsBuilder,
-    RemoveContainerOptionsBuilder, RestartContainerOptionsBuilder,
-    StartContainerOptionsBuilder, StopContainerOptionsBuilder,
+    CreateImageOptionsBuilder, ListContainersOptionsBuilder, RemoveContainerOptionsBuilder,
+    RestartContainerOptionsBuilder, StartContainerOptionsBuilder, StopContainerOptionsBuilder,
 };
-use actix_web::rt::time::sleep;
 use futures_util::StreamExt;
 use serde::Serialize;
 use std::time::Duration;
@@ -23,18 +22,25 @@ pub struct ContainerInfo {
 
 impl Scheduler {
     pub fn new() -> Self {
-        let docker = Docker::connect_with_defaults().expect("Impossible de se connecter au Docker Engine");
+        let docker =
+            Docker::connect_with_defaults().expect("Impossible de se connecter au Docker Engine");
         Self { docker }
     }
 
     pub async fn stop(&self, app_name: &str) {
         self.docker
-            .stop_container(app_name, Some(StopContainerOptionsBuilder::default().build()))
+            .stop_container(
+                app_name,
+                Some(StopContainerOptionsBuilder::default().build()),
+            )
             .await
             .unwrap();
 
         self.docker
-            .remove_container(app_name, Some(RemoveContainerOptionsBuilder::default().build()))
+            .remove_container(
+                app_name,
+                Some(RemoveContainerOptionsBuilder::default().build()),
+            )
             .await
             .unwrap();
     }
@@ -49,14 +55,17 @@ impl Scheduler {
 
     pub async fn list(&self) -> Vec<ContainerInfo> {
         self.docker
-            .list_containers(Some(ListContainersOptionsBuilder::default().all(true).build()))
+            .list_containers(Some(
+                ListContainersOptionsBuilder::default().all(true).build(),
+            ))
             .await
             .unwrap()
             .into_iter()
             .map(|c| ContainerInfo {
                 id: c.id.unwrap_or_default(),
                 image: c.image.unwrap_or_default(),
-                name: c.names
+                name: c
+                    .names
                     .and_then(|names| names.into_iter().next())
                     .map(|n| n.trim_start_matches('/').to_string())
                     .unwrap_or_default(),
@@ -66,18 +75,24 @@ impl Scheduler {
 
     pub async fn restart(&self, app_name: &str) {
         self.docker
-            .restart_container(app_name, Some(RestartContainerOptionsBuilder::default().build()))
+            .restart_container(
+                app_name,
+                Some(RestartContainerOptionsBuilder::default().build()),
+            )
             .await
             .unwrap();
     }
 
+    #[allow(dead_code)]
     pub async fn watch(&self) {
         loop {
             sleep(Duration::from_secs(5)).await;
 
             let containers = self
                 .docker
-                .list_containers(Some(ListContainersOptionsBuilder::default().all(true).build()))
+                .list_containers(Some(
+                    ListContainersOptionsBuilder::default().all(true).build(),
+                ))
                 .await
                 .unwrap();
 
@@ -88,13 +103,11 @@ impl Scheduler {
                     .map(|s| *s == ContainerSummaryStateEnum::EXITED)
                     .unwrap_or(false);
 
-                if is_exited {
-                    if let Some(names) = &container.names {
-                        for name in names {
-                            let name = name.trim_start_matches('/');
-                            println!("watch: restarting exited container {name}");
-                            self.restart(name).await;
-                        }
+                if is_exited && let Some(names) = &container.names {
+                    for name in names {
+                        let name = name.trim_start_matches('/');
+                        println!("watch: restarting exited container {name}");
+                        self.restart(name).await;
                     }
                 }
             }
@@ -109,7 +122,11 @@ impl Scheduler {
         };
 
         let mut stream = self.docker.create_image(
-            Some(CreateImageOptionsBuilder::default().from_image(&image_with_tag).build()),
+            Some(
+                CreateImageOptionsBuilder::default()
+                    .from_image(&image_with_tag)
+                    .build(),
+            ),
             None,
             None,
         );
@@ -122,18 +139,25 @@ impl Scheduler {
             self.pull(image).await;
         }
 
-        let response = self.docker.create_container(
-            None::<bollard::query_parameters::CreateContainerOptions>,
-            ContainerCreateBody {
-                image: Some(image.to_string()),
-                ..Default::default()
-            }
-        ).await.unwrap();
+        let response = self
+            .docker
+            .create_container(
+                None::<bollard::query_parameters::CreateContainerOptions>,
+                ContainerCreateBody {
+                    image: Some(image.to_string()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
 
-        self.docker.start_container(
-            &response.id,
-            Some(StartContainerOptionsBuilder::default().build()),
-        ).await.unwrap();
+        self.docker
+            .start_container(
+                &response.id,
+                Some(StartContainerOptionsBuilder::default().build()),
+            )
+            .await
+            .unwrap();
 
         response.id
     }

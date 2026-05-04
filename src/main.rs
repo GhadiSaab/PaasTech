@@ -1,7 +1,7 @@
 mod scheduler;
 
 use actix_multipart::Multipart;
-use actix_web::{get, post, web, App, Error, HttpResponse, HttpServer, Responder};
+use actix_web::{App, Error, HttpResponse, HttpServer, Responder, get, post, web};
 use futures_util::TryStreamExt;
 use serde::Deserialize;
 use std::path::Path;
@@ -38,7 +38,7 @@ async fn main() -> std::io::Result<()> {
     let scheduler = web::Data::new(Scheduler::new());
 
     println!("Running on http://{}:{}", config.host, config.port);
-    HttpServer::new(move ||
+    HttpServer::new(move || {
         App::new()
             .app_data(scheduler.clone())
             .service(upload_app)
@@ -47,10 +47,10 @@ async fn main() -> std::io::Result<()> {
             .service(stop_app)
             .service(restart_app)
             .service(status_app)
-    )
-        .bind((config.host, config.port))?
-        .run()
-        .await
+    })
+    .bind((config.host, config.port))?
+    .run()
+    .await
 }
 
 // routes
@@ -101,30 +101,21 @@ async fn deploy_app(
 }
 
 #[post("/app/{container_id}/stop")]
-async fn stop_app(
-    scheduler: web::Data<Scheduler>,
-    path: web::Path<String>,
-) -> impl Responder {
+async fn stop_app(scheduler: web::Data<Scheduler>, path: web::Path<String>) -> impl Responder {
     let container_id = path.into_inner();
     scheduler.stop(&container_id).await;
     HttpResponse::Ok().finish()
 }
 
 #[post("/app/{container_id}/restart")]
-async fn restart_app(
-    scheduler: web::Data<Scheduler>,
-    path: web::Path<String>,
-) -> impl Responder {
+async fn restart_app(scheduler: web::Data<Scheduler>, path: web::Path<String>) -> impl Responder {
     let container_id = path.into_inner();
     scheduler.restart(&container_id).await;
     HttpResponse::Ok().finish()
 }
 
 #[get("/app/{container_id}/status")]
-async fn status_app(
-    scheduler: web::Data<Scheduler>,
-    path: web::Path<String>,
-) -> impl Responder {
+async fn status_app(scheduler: web::Data<Scheduler>, path: web::Path<String>) -> impl Responder {
     let container_id = path.into_inner();
     let status = scheduler.status(&container_id).await;
     HttpResponse::Ok().body(status)
