@@ -1,0 +1,70 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            INSERT INTO applications (id, name, image_id, container_id, port, status, env, created_at)\n            VALUES ($1, $2, $3, $4, $5, $6, $7, NOW())\n            ON CONFLICT (name) DO UPDATE\n                SET image_id = EXCLUDED.image_id,\n                    container_id = EXCLUDED.container_id,\n                    port = EXCLUDED.port,\n                    status = EXCLUDED.status,\n                    env = EXCLUDED.env\n            RETURNING id, name, image_id, container_id, port, status, env, created_at\n            ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "name",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 2,
+        "name": "image_id",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 3,
+        "name": "container_id",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 4,
+        "name": "port",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 5,
+        "name": "status",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 6,
+        "name": "env",
+        "type_info": "Jsonb"
+      },
+      {
+        "ordinal": 7,
+        "name": "created_at",
+        "type_info": "Timestamp"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Varchar",
+        "Varchar",
+        "Varchar",
+        "Int4",
+        "Varchar",
+        "Jsonb"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      true,
+      true,
+      true,
+      false,
+      true,
+      false
+    ]
+  },
+  "hash": "c7d1462f12a66a40645b1adbe548aec6665217a05d0c7d667142361ec2294bea"
+}

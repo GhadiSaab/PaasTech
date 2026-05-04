@@ -1,0 +1,5 @@
+[advisories]
+ignore = [
+    # Marvin Attack on RSA - affects sqlx-mysql which we don't use (postgres only)
+    "RUSTSEC-2023-0071",
+]
