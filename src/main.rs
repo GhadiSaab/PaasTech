@@ -4,7 +4,9 @@ mod scheduler;
 
 use crate::engine::{extract_zip, launch_code, save_multipart_file};
 use actix_multipart::Multipart;
-use actix_web::{App, Error, HttpResponse, HttpServer, Responder, delete, error, get, patch, post, web};
+use actix_web::{
+    App, Error, HttpResponse, HttpServer, Responder, delete, error, get, patch, post, web,
+};
 use futures_util::TryStreamExt;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
@@ -12,6 +14,8 @@ use sqlx::PgPool;
 use tokio::fs;
 use tokio::fs::File;
 use tokio::io::AsyncWriteExt;
+use utoipa::{OpenApi, ToSchema};
+use utoipa_swagger_ui::SwaggerUi;
 use uuid::Uuid;
 
 use registry::Registry;
@@ -29,7 +33,10 @@ fn docker_image_for_service(name: &str) -> &'static str {
 }
 
 async fn validate_docker_tag(client: &Client, image: &str, tag: &str) -> Result<(), Error> {
-    let url = format!("https://hub.docker.com/v2/repositories/{}/tags/{}/", image, tag);
+    let url = format!(
+        "https://hub.docker.com/v2/repositories/{}/tags/{}/",
+        image, tag
+    );
     let resp = client
         .get(&url)
         .send()
@@ -42,7 +49,9 @@ async fn validate_docker_tag(client: &Client, image: &str, tag: &str) -> Result<
             "Version '{}' does not exist for this service on Docker Hub",
             tag
         ))),
-        _ => Err(error::ErrorInternalServerError("Unexpected response from Docker Hub")),
+        _ => Err(error::ErrorInternalServerError(
+            "Unexpected response from Docker Hub",
+        )),
     }
 }
 
@@ -84,6 +93,27 @@ async fn init() -> Config {
     }
 }
 
+#[derive(OpenApi)]
+#[openapi(
+    paths(
+        get_service_versions,
+        upload_app,
+        create_resource,
+        get_resources,
+        get_resource,
+        update_resource,
+        delete_resource,
+    ),
+    components(schemas(Resource, CreateResourcePayload, UpdateResourcePayload)),
+    tags(
+        (name = "services", description = "Service version management"),
+        (name = "apps", description = "Application management"),
+        (name = "resources", description = "Resource management"),
+    ),
+    info(title = "PaaSTech API", version = "0.1.0", description = "PaaSTech Platform as a Service API")
+)]
+struct ApiDoc;
+
 #[actix_web::main]
 async fn main() -> std::io::Result<()> {
     dotenvy::dotenv().ok();
@@ -101,10 +131,18 @@ async fn main() -> std::io::Result<()> {
     let http_client = Client::new();
 
     println!("Running on http://{}:{}", config.host, config.port);
+    println!(
+        "Swagger UI: http://{}:{}/swagger-ui/",
+        config.host, config.port
+    );
     HttpServer::new(move || {
         App::new()
             .app_data(web::Data::new(pool.clone()))
             .app_data(web::Data::new(http_client.clone()))
+            .service(
+                SwaggerUi::new("/swagger-ui/{_:.*}")
+                    .url("/api-docs/openapi.json", ApiDoc::openapi()),
+            )
             .service(get_service_versions)
             .app_data(scheduler.clone())
             .service(upload_app)
@@ -115,6 +153,7 @@ async fn main() -> std::io::Result<()> {
             .service(status_app)
             .service(create_resource)
             .service(get_resources)
+            .service(get_resource)
             .service(update_resource)
             .service(delete_resource)
     })
@@ -125,7 +164,7 @@ async fn main() -> std::io::Result<()> {
 
 // structs
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, ToSchema)]
 struct Resource {
     id: String,
     display_name: String,
@@ -134,7 +173,7 @@ struct Resource {
     application_ids: Vec<String>,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, ToSchema)]
 struct CreateResourcePayload {
     display_name: String,
     name: String,
@@ -142,7 +181,7 @@ struct CreateResourcePayload {
     application_id: Option<String>,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, ToSchema)]
 struct UpdateResourcePayload {
     display_name: Option<String>,
     version: Option<String>,
@@ -150,6 +189,17 @@ struct UpdateResourcePayload {
 
 // routes
 
+#[utoipa::path(
+    get,
+    path = "/service/{name}/versions",
+    params(("name" = String, Path, description = "Service name (postgres, redis, s3)")),
+    responses(
+        (status = 200, description = "Available versions", body = Vec<String>),
+        (status = 400, description = "Invalid service name"),
+        (status = 500, description = "Internal server error"),
+    ),
+    tag = "services"
+)]
 #[get("/service/{name}/versions")]
 async fn get_service_versions(
     client: web::Data<Client>,
@@ -191,6 +241,16 @@ async fn get_service_versions(
     Ok(HttpResponse::Ok().json(versions))
 }
 
+#[utoipa::path(
+    post,
+    path = "/app/upload",
+    request_body(content_type = "multipart/form-data", description = "Zip archive of the application"),
+    responses(
+        (status = 200, description = "File uploaded successfully"),
+        (status = 500, description = "Internal server error"),
+    ),
+    tag = "apps"
+)]
 #[post("/app/upload")]
 async fn upload_app(payload: Multipart) -> Result<impl Responder, Error> {
     let zip_filepath = match save_multipart_file(payload).await? {
@@ -322,6 +382,17 @@ async fn status_app(
 #[cfg(test)]
 mod tests;
 
+#[utoipa::path(
+    post,
+    path = "/resource",
+    request_body = CreateResourcePayload,
+    responses(
+        (status = 201, description = "Resource created", body = Resource),
+        (status = 400, description = "Invalid service name or version"),
+        (status = 500, description = "Internal server error"),
+    ),
+    tag = "resources"
+)]
 #[post("/resource")]
 async fn create_resource(
     pool: web::Data<PgPool>,
@@ -352,19 +423,19 @@ async fn create_resource(
     .await
     .map_err(error::ErrorInternalServerError)?;
 
-    if let Some(app_id) = &payload.application_id {
-        if !app_id.is_empty() {
-            let app_uuid = Uuid::parse_str(app_id)
-                .map_err(|_| error::ErrorBadRequest("Invalid application_id"))?;
-            sqlx::query!(
-                "INSERT INTO application_services (application_id, service_id) VALUES ($1, $2)",
-                app_uuid,
-                id,
-            )
-            .execute(pool.get_ref())
-            .await
-            .map_err(error::ErrorInternalServerError)?;
-        }
+    if let Some(app_id) = &payload.application_id
+        && !app_id.is_empty()
+    {
+        let app_uuid = Uuid::parse_str(app_id)
+            .map_err(|_| error::ErrorBadRequest("Invalid application_id"))?;
+        sqlx::query!(
+            "INSERT INTO application_services (application_id, service_id) VALUES ($1, $2)",
+            app_uuid,
+            id,
+        )
+        .execute(pool.get_ref())
+        .await
+        .map_err(error::ErrorInternalServerError)?;
     }
 
     Ok(HttpResponse::Created().json(Resource {
@@ -381,6 +452,15 @@ async fn create_resource(
     }))
 }
 
+#[utoipa::path(
+    get,
+    path = "/resource",
+    responses(
+        (status = 200, description = "List of resources", body = Vec<Resource>),
+        (status = 500, description = "Internal server error"),
+    ),
+    tag = "resources"
+)]
 #[get("/resource")]
 async fn get_resources(pool: web::Data<PgPool>) -> Result<impl Responder, Error> {
     let resources = sqlx::query_as!(
@@ -402,13 +482,24 @@ async fn get_resources(pool: web::Data<PgPool>) -> Result<impl Responder, Error>
     Ok(HttpResponse::Ok().json(resources))
 }
 
+#[utoipa::path(
+    get,
+    path = "/resource/{id}",
+    params(("id" = String, Path, description = "Resource UUID")),
+    responses(
+        (status = 200, description = "Resource found", body = Resource),
+        (status = 400, description = "Invalid UUID"),
+        (status = 404, description = "Resource not found"),
+        (status = 500, description = "Internal server error"),
+    ),
+    tag = "resources"
+)]
 #[get("/resource/{id}")]
 async fn get_resource(
     pool: web::Data<PgPool>,
     id: web::Path<String>,
 ) -> Result<impl Responder, Error> {
-    let uuid = Uuid::parse_str(&id)
-        .map_err(|_| error::ErrorBadRequest("Invalid resource id"))?;
+    let uuid = Uuid::parse_str(&id).map_err(|_| error::ErrorBadRequest("Invalid resource id"))?;
 
     let resource = sqlx::query_as!(
         Resource,
@@ -432,6 +523,19 @@ async fn get_resource(
     Ok(HttpResponse::Ok().json(resource))
 }
 
+#[utoipa::path(
+    patch,
+    path = "/resource/{id}",
+    params(("id" = String, Path, description = "Resource UUID")),
+    request_body = UpdateResourcePayload,
+    responses(
+        (status = 200, description = "Resource updated"),
+        (status = 400, description = "Invalid UUID or version"),
+        (status = 404, description = "Resource not found"),
+        (status = 500, description = "Internal server error"),
+    ),
+    tag = "resources"
+)]
 #[patch("/resource/{id}")]
 async fn update_resource(
     pool: web::Data<PgPool>,
@@ -439,8 +543,7 @@ async fn update_resource(
     id: web::Path<String>,
     payload: web::Json<UpdateResourcePayload>,
 ) -> Result<impl Responder, Error> {
-    let uuid = Uuid::parse_str(&id)
-        .map_err(|_| error::ErrorBadRequest("Invalid resource id"))?;
+    let uuid = Uuid::parse_str(&id).map_err(|_| error::ErrorBadRequest("Invalid resource id"))?;
 
     if let Some(version) = &payload.version {
         let service = sqlx::query!("SELECT name FROM services WHERE id = $1", uuid)
@@ -474,13 +577,24 @@ async fn update_resource(
     Ok(HttpResponse::Ok().body("Resource successfully updated"))
 }
 
+#[utoipa::path(
+    delete,
+    path = "/resource/{id}",
+    params(("id" = String, Path, description = "Resource UUID")),
+    responses(
+        (status = 204, description = "Resource deleted"),
+        (status = 400, description = "Invalid UUID"),
+        (status = 404, description = "Resource not found"),
+        (status = 500, description = "Internal server error"),
+    ),
+    tag = "resources"
+)]
 #[delete("/resource/{id}")]
 async fn delete_resource(
     pool: web::Data<PgPool>,
     id: web::Path<String>,
 ) -> Result<impl Responder, Error> {
-    let uuid = Uuid::parse_str(&id)
-        .map_err(|_| error::ErrorBadRequest("Invalid resource id"))?;
+    let uuid = Uuid::parse_str(&id).map_err(|_| error::ErrorBadRequest("Invalid resource id"))?;
 
     let result = sqlx::query!("DELETE FROM services WHERE id = $1", uuid)
         .execute(pool.get_ref())
