@@ -6,9 +6,12 @@ use actix_web::{App, Error, HttpResponse, HttpServer, Responder, post, web};
 use futures_util::TryStreamExt;
 use sqlx::PgPool;
 use std::path::Path;
+mod engine;
+
+use crate::engine::{extract_zip, save_multipart_file};
+use actix_multipart::Multipart;
+use actix_web::{App, Error, HttpResponse, HttpServer, Responder, post};
 use tokio::fs;
-use tokio::fs::File;
-use tokio::io::AsyncWriteExt;
 
 struct Config {
     host: String,
@@ -17,9 +20,11 @@ struct Config {
 }
 
 async fn init() -> Config {
-    fs::create_dir_all("uploads")
+    fs::create_dir_all("/tmp/uploads")
         .await
         .expect("Folder creation failed.");
+
+    dotenvy::dotenv().ok();
 
     let host = std::env::var("HOST").unwrap_or_else(|_| "127.0.0.1".to_string());
     let port = std::env::var("PORT")
@@ -60,26 +65,19 @@ async fn main() -> std::io::Result<()> {
 // routes
 
 #[post("/app/upload")]
-async fn upload_app(mut payload: Multipart) -> Result<impl Responder, Error> {
-    while let Ok(Some(mut field)) = payload.try_next().await {
-        let filename: &str = match field.content_disposition() {
-            Some(content) => match content.get_filename() {
-                Some(name) => name,
-                None => continue,
-            },
-            None => continue,
-        };
+async fn upload_app(payload: Multipart) -> Result<impl Responder, Error> {
+    let zip_filepath = match save_multipart_file(payload).await? {
+        Some(path) => path,
+        None => return Ok(HttpResponse::BadRequest().body("provide file in payload")),
+    };
 
-        // TODO check if it's a real zip file
+    println!("Zip file uploaded to {:?}", zip_filepath);
 
-        let filepath = format!("./uploads/{}", filename);
-        let path = Path::new(&filepath);
-
-        let mut f = File::create(path).await?;
-        while let Ok(Some(chunk)) = field.try_next().await {
-            f.write_all(&chunk).await?;
+    match extract_zip(&zip_filepath).await {
+        Ok(_) => Ok(HttpResponse::Ok().body("extraction successful.")),
+        Err(e) => {
+            eprintln!("extratc failed: {}", e);
+            Ok(HttpResponse::InternalServerError().body("Extraction failed"))
         }
     }
-
-    Ok(HttpResponse::Ok().body("Zip file uploaded successfully!"))
 }
