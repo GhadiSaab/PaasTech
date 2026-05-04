@@ -17,7 +17,9 @@ struct Config {
 }
 
 async fn init() -> Config {
-    fs::create_dir_all("uploads").await.expect("Folder creation failed.");
+    fs::create_dir_all("uploads")
+        .await
+        .expect("Folder creation failed.");
 
     dotenvy::dotenv().ok();
 
@@ -56,15 +58,11 @@ async fn main() -> std::io::Result<()> {
 #[post("/app/upload")]
 async fn upload_app(mut payload: Multipart) -> Result<impl Responder, Error> {
     while let Ok(Some(mut field)) = payload.try_next().await {
-        let filename: &str;
-
-        match field.content_disposition() {
-            Some(content) => {
-                filename = match content.get_filename() {
-                    Some(name) => name,
-                    None => continue,
-                };
-            }
+        let filename: &str = match field.content_disposition() {
+            Some(content) => match content.get_filename() {
+                Some(name) => name,
+                None => continue,
+            },
             None => continue,
         };
 

@@ -1,0 +1,9 @@
+rustdoc:
+  extends: .rust-base
+  stage: documentation
+  script:
+    - cargo doc --no-deps
+  artifacts:
+    paths:
+      - target/doc
+    expire_in: 1 week
