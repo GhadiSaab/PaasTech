@@ -1,5 +1,5 @@
-mod engine;
 mod docker;
+mod engine;
 mod models;
 mod registry;
 mod scheduler;
@@ -14,16 +14,12 @@ use docker::{
     docker_image_for_service, fetch_service_versions, prepare_config_for_service,
     service_port_for_service, validate_docker_tag,
 };
-use futures_util::TryStreamExt;
 use models::{CreateResourcePayload, Resource, UpdateResourcePayload};
 use reqwest::Client;
 use scheduler::Scheduler;
 use sqlx::PgPool;
 use std::collections::HashMap;
-use std::path::Path;
 use tokio::fs;
-use tokio::fs::File;
-use tokio::io::AsyncWriteExt;
 use utoipa::OpenApi;
 use utoipa_swagger_ui::SwaggerUi;
 use uuid::Uuid;
