@@ -6,8 +6,31 @@ audit:
     - cargo install cargo-audit --locked
     - cargo audit --json > cargo-audit-raw.json 2>/dev/null; AUDIT_EXIT=$?
     - |
-      jq '{
+      jq --arg now "$(date -u +%Y-%m-%dT%H:%M:%S)" '{
         "version": "15.0.7",
+        "scan": {
+          "start_time": $now,
+          "end_time": $now,
+          "status": "success",
+          "type": "dependency_scanning",
+          "analyzer": {
+            "id": "cargo-audit",
+            "name": "cargo-audit",
+            "version": "0.21",
+            "vendor": {"name": "RustSec"}
+          },
+          "scanner": {
+            "id": "cargo-audit",
+            "name": "cargo-audit",
+            "version": "0.21",
+            "vendor": {"name": "RustSec"}
+          }
+        },
+        "dependency_files": [{
+          "path": "Cargo.lock",
+          "package_manager": "cargo",
+          "dependencies": []
+        }],
         "vulnerabilities": (.vulnerabilities.list // [] | map({
           "id": .advisory.id,
           "name": .advisory.title,
