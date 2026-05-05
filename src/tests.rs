@@ -20,6 +20,17 @@ async fn build_pool() -> web::Data<PgPool> {
 }
 
 #[actix_web::test]
+async fn test_db_connection() {
+    let pool = build_pool().await;
+    let result = sqlx::query("SELECT 1").fetch_one(pool.get_ref()).await;
+    assert!(
+        result.is_ok(),
+        "Database connection failed: {:?}",
+        result.err()
+    );
+}
+
+#[actix_web::test]
 async fn test_list_apps() {
     let pool = build_pool().await;
     let app = test::init_service(
