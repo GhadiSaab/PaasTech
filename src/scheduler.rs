@@ -170,7 +170,9 @@ impl Scheduler {
         service_id: &str,
         image: &str,
         container_port: u16,
+        existing_port: Option<u16>,
         env_vars: Vec<String>,
+        binds: Vec<String>,
     ) -> Result<(String, u16), Box<dyn std::error::Error + Send + Sync>> {
         self.docker
             .create_image(
@@ -185,7 +187,10 @@ impl Scheduler {
             .try_collect::<Vec<_>>()
             .await?;
 
-        let host_port = find_free_port()?;
+        let host_port = match existing_port {
+            Some(p) => p,
+            None => find_free_port()?,
+        };
 
         let port_key = format!("{}/tcp", container_port);
         let mut port_bindings: HashMap<String, Option<Vec<PortBinding>>> = HashMap::new();
@@ -214,6 +219,7 @@ impl Scheduler {
                     exposed_ports: Some(vec![port_key]),
                     host_config: Some(HostConfig {
                         port_bindings: Some(port_bindings),
+                        binds: if binds.is_empty() { None } else { Some(binds) },
                         ..Default::default()
                     }),
                     ..Default::default()

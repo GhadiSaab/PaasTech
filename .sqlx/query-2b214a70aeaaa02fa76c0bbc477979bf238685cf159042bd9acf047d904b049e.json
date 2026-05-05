@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT name, version, status FROM services WHERE id = $1",
+  "query": "SELECT name, version, status, port FROM services WHERE id = $1",
   "describe": {
     "columns": [
       {
@@ -17,6 +17,11 @@
         "ordinal": 2,
         "name": "status",
         "type_info": "Varchar"
+      },
+      {
+        "ordinal": 3,
+        "name": "port",
+        "type_info": "Int4"
       }
     ],
     "parameters": {
@@ -27,8 +32,9 @@
     "nullable": [
       false,
       false,
-      false
+      false,
+      true
     ]
   },
-  "hash": "b362406e77af9405f1e7fafabacc9ef63f082f4946d3dadc1ec9f8a20bfb3b30"
+  "hash": "2b214a70aeaaa02fa76c0bbc477979bf238685cf159042bd9acf047d904b049e"
 }

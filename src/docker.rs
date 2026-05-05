@@ -23,6 +23,23 @@ pub fn container_image_for_service(name: &str) -> &'static str {
     }
 }
 
+pub fn prepare_config_for_service(
+    name: &str,
+    service_id: &str,
+) -> Result<Vec<String>, std::io::Error> {
+    match name {
+        "s3" => {
+            let dir = format!("/tmp/paastech/services/{}", service_id);
+            std::fs::create_dir_all(&dir)?;
+            let config_path = format!("{}/garage.toml", dir);
+            let template = include_str!("../services/s3/garage.toml");
+            std::fs::write(&config_path, template)?;
+            Ok(vec![format!("{}:/etc/garage.toml:ro", config_path)])
+        }
+        _ => Ok(vec![]),
+    }
+}
+
 pub fn default_env_vars_for_service(name: &str) -> Vec<(String, String)> {
     match name {
         "postgres" => vec![
@@ -31,20 +48,10 @@ pub fn default_env_vars_for_service(name: &str) -> Vec<(String, String)> {
             ("POSTGRES_DB".to_string(), "postgres".to_string()),
         ],
         "redis" => vec![("REDIS_PASSWORD".to_string(), "redis".to_string())],
-        "s3" => vec![
-            (
-                "GARAGE_RPC_SECRET".to_string(),
-                format!("{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple()),
-            ),
-            (
-                "GARAGE_METADATA_DIR".to_string(),
-                "/var/lib/garage/meta".to_string(),
-            ),
-            (
-                "GARAGE_DATA_DIR".to_string(),
-                "/var/lib/garage/data".to_string(),
-            ),
-        ],
+        "s3" => vec![(
+            "GARAGE_RPC_SECRET".to_string(),
+            format!("{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple()),
+        )],
         _ => unreachable!(),
     }
 }

@@ -11,8 +11,8 @@ use actix_web::{
 };
 use docker::{
     VALID_SERVICES, container_image_for_service, default_env_vars_for_service,
-    docker_image_for_service, fetch_service_versions, service_port_for_service,
-    validate_docker_tag,
+    docker_image_for_service, fetch_service_versions, prepare_config_for_service,
+    service_port_for_service, validate_docker_tag,
 };
 use futures_util::TryStreamExt;
 use models::{CreateResourcePayload, Resource, UpdateResourcePayload};
@@ -456,8 +456,17 @@ async fn create_resource(
         .iter()
         .map(|(k, v)| format!("{k}={v}"))
         .collect();
+    let binds = prepare_config_for_service(&payload.name, &id.to_string())
+        .map_err(error::ErrorInternalServerError)?;
     let (container_id, host_port) = scheduler
-        .start_service(&id.to_string(), &image, container_port, env_vars)
+        .start_service(
+            &id.to_string(),
+            &image,
+            container_port,
+            None,
+            env_vars,
+            binds,
+        )
         .await
         .map_err(|e| error::ErrorInternalServerError(format!("Failed to start service: {e}")))?;
 
@@ -673,7 +682,7 @@ async fn start_resource(
     let uuid = Uuid::parse_str(&id).map_err(|_| error::ErrorBadRequest("Invalid resource id"))?;
 
     let service = sqlx::query!(
-        "SELECT name, version, status FROM services WHERE id = $1",
+        "SELECT name, version, status, port FROM services WHERE id = $1",
         uuid
     )
     .fetch_optional(pool.get_ref())
@@ -691,9 +700,19 @@ async fn start_resource(
         service.version
     );
     let container_port = service_port_for_service(&service.name);
+    let existing_port = service.port.map(|p| p as u16);
     let env_vars = fetch_resource_env_vars(pool.get_ref(), uuid).await?;
+    let binds = prepare_config_for_service(&service.name, &uuid.to_string())
+        .map_err(error::ErrorInternalServerError)?;
     let (container_id, host_port) = scheduler
-        .start_service(&uuid.to_string(), &image, container_port, env_vars)
+        .start_service(
+            &uuid.to_string(),
+            &image,
+            container_port,
+            existing_port,
+            env_vars,
+            binds,
+        )
         .await
         .map_err(|e| error::ErrorInternalServerError(format!("Failed to start service: {e}")))?;
 
@@ -747,7 +766,7 @@ async fn stop_resource(
         .map_err(|e| error::ErrorInternalServerError(format!("Failed to stop service: {e}")))?;
 
     sqlx::query!(
-        "UPDATE services SET status = 'stopped', container_id = NULL, port = NULL WHERE id = $1",
+        "UPDATE services SET status = 'stopped', container_id = NULL WHERE id = $1",
         uuid,
     )
     .execute(pool.get_ref())
