@@ -15,3 +15,4 @@ bollard = "*"
 dotenvy = "0.15"
 serde = { version = "1.0.228", features = ["derive"] }
 chrono = { version = "0.4.44", features = ["serde"] }
+zip-extract = "0.2.1"

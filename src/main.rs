@@ -1,15 +1,14 @@
+mod engine;
 mod registry;
 mod scheduler;
 
+use crate::engine::{extract_zip, launch_code, save_multipart_file};
 use actix_multipart::Multipart;
 use actix_web::{App, Error, HttpResponse, HttpServer, Responder, get, post, web};
 use futures_util::TryStreamExt;
 use serde::Deserialize;
 use sqlx::PgPool;
-use std::path::Path;
 use tokio::fs;
-use tokio::fs::File;
-use tokio::io::AsyncWriteExt;
 
 use registry::Registry;
 use scheduler::Scheduler;
@@ -21,9 +20,11 @@ struct Config {
 }
 
 async fn init() -> Config {
-    fs::create_dir_all("uploads")
+    fs::create_dir_all("/tmp/uploads")
         .await
         .expect("Folder creation failed.");
+
+    dotenvy::dotenv().ok();
 
     let host = std::env::var("HOST").unwrap_or_else(|_| "127.0.0.1".to_string());
     let port = std::env::var("PORT")
@@ -31,7 +32,7 @@ async fn init() -> Config {
         .parse()
         .expect("PORT must be a valid number");
     let database_url = std::env::var("DATABASE_URL")
-        .unwrap_or_else(|_| "postgres://paastech:paastech@localhost:5432/paastech".to_string());
+        .unwrap_or_else(|_| "postgresql://paastech:paastech@localhost:5433/paastech".to_string());
 
     Config {
         host,
@@ -45,6 +46,8 @@ async fn main() -> std::io::Result<()> {
     dotenvy::dotenv().ok();
 
     let config: Config = init().await;
+
+    println!("Loading PSQL...");
 
     let pool = PgPool::connect(&config.database_url)
         .await
@@ -72,28 +75,21 @@ async fn main() -> std::io::Result<()> {
 // routes
 
 #[post("/app/upload")]
-async fn upload_app(mut payload: Multipart) -> Result<impl Responder, Error> {
-    while let Ok(Some(mut field)) = payload.try_next().await {
-        let filename: &str = match field.content_disposition() {
-            Some(content) => match content.get_filename() {
-                Some(name) => name,
-                None => continue,
-            },
-            None => continue,
-        };
+async fn upload_app(payload: Multipart) -> Result<impl Responder, Error> {
+    let zip_filepath = match save_multipart_file(payload).await? {
+        Some(path) => path,
+        None => return Ok(HttpResponse::BadRequest().body("provide file in payload")),
+    };
 
-        // TODO check if it's a real zip file
+    println!("Zip file uploaded to {:?}", zip_filepath);
 
-        let filepath = format!("./uploads/{}", filename);
-        let path = Path::new(&filepath);
+    let extracted_folder = extract_zip(zip_filepath).await.expect("extract failed");
 
-        let mut f = File::create(path).await?;
-        while let Ok(Some(chunk)) = field.try_next().await {
-            f.write_all(&chunk).await?;
-        }
-    }
+    println!("Extraction worked");
 
-    Ok(HttpResponse::Ok().body("Zip file uploaded successfully!"))
+    launch_code(extracted_folder).await;
+
+    Ok(HttpResponse::Ok().body("worked\n"))
 }
 
 #[get("/app")]
