@@ -1,6 +1,9 @@
 pages:
   extends: .rust-base
-  stage: documentation
+  stage: publish
+  needs:
+    - job: test
+    - job: audit
   rules:
     - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
   script:

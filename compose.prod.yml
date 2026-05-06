@@ -24,8 +24,10 @@ services:
       - "${PORT:-8080}:${PORT:-8080}"
     environment:
       PORT: "${PORT:-8080}"
-      HOST: "${HOST:-0.0.0.0}"
-      DB_HOST: "db"
+      HOST: "0.0.0.0"
+      DATABASE_URL: "postgresql://${POSTGRES_USER:-paastech}:${POSTGRES_PASSWORD:-paastech}@db:5432/${POSTGRES_DB:-paastech}"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
     depends_on:
       db:
         condition: service_healthy
