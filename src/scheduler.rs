@@ -2,9 +2,12 @@ use actix_web::rt::time::sleep;
 use bollard::Docker;
 use bollard::models::ContainerCreateBody;
 use bollard::query_parameters::{
-    CreateContainerOptionsBuilder, ListContainersOptionsBuilder, RemoveContainerOptionsBuilder,
-    RestartContainerOptionsBuilder, StartContainerOptionsBuilder, StopContainerOptionsBuilder,
+    CreateContainerOptionsBuilder, CreateImageOptionsBuilder, ListContainersOptionsBuilder,
+    RemoveContainerOptionsBuilder, RestartContainerOptionsBuilder, StartContainerOptionsBuilder,
+    StopContainerOptionsBuilder,
 };
+use futures_util::StreamExt;
+use serde::Serialize;
 use sqlx::PgPool;
 use std::time::Duration;
 
@@ -15,6 +18,13 @@ pub struct Scheduler {
     docker: Docker,
 }
 
+#[derive(Serialize)]
+pub struct ContainerInfo {
+    pub id: String,
+    pub image: String,
+    pub name: String,
+}
+
 #[allow(dead_code)]
 impl Scheduler {
     pub fn new() -> Self {
@@ -23,7 +33,7 @@ impl Scheduler {
         Self { docker }
     }
 
-    pub async fn stop(&self, pool: &PgPool, app_name: &str) {
+    pub async fn stop(&self, app_name: &str) {
         if let Err(e) = self
             .docker
             .stop_container(
@@ -45,10 +55,6 @@ impl Scheduler {
         {
             eprintln!("docker: failed to remove {app_name}: {e}");
         }
-
-        if let Err(e) = Registry::update_status(pool, app_name, "stopped").await {
-            eprintln!("registry: failed to update status for {app_name}: {e}");
-        }
     }
 
     pub async fn inspect(&self, app_name: &str) -> String {
@@ -62,7 +68,7 @@ impl Scheduler {
         }
     }
 
-    pub async fn list(&self) -> Vec<String> {
+    pub async fn list(&self) -> Vec<ContainerInfo> {
         self.docker
             .list_containers(Some(
                 ListContainersOptionsBuilder::default().all(true).build(),
@@ -70,9 +76,15 @@ impl Scheduler {
             .await
             .unwrap()
             .into_iter()
-            .filter_map(|c| c.names)
-            .flatten()
-            .map(|name| name.trim_start_matches('/').to_string())
+            .map(|c| ContainerInfo {
+                id: c.id.unwrap_or_default(),
+                image: c.image.unwrap_or_default(),
+                name: c
+                    .names
+                    .and_then(|names| names.into_iter().next())
+                    .map(|n| n.trim_start_matches('/').to_string())
+                    .unwrap_or_default(),
+            })
             .collect()
     }
 
@@ -121,7 +133,31 @@ impl Scheduler {
         }
     }
 
-    pub async fn deploy(&self, pool: &PgPool, app_name: &str, image: &str, port: i32) {
+    async fn pull(&self, image: &str) {
+        let image_with_tag = if image.contains(':') {
+            image.to_string()
+        } else {
+            format!("{image}:latest")
+        };
+
+        let mut stream = self.docker.create_image(
+            Some(
+                CreateImageOptionsBuilder::default()
+                    .from_image(&image_with_tag)
+                    .build(),
+            ),
+            None,
+            None,
+        );
+        while stream.next().await.is_some() {}
+    }
+
+    pub async fn deploy(&self, app_name: &str, image: &str) -> Option<String> {
+        let image_exists = self.docker.inspect_image(image).await.is_ok();
+        if !image_exists {
+            self.pull(image).await;
+        }
+
         if let Err(e) = self
             .docker
             .create_container(
@@ -138,7 +174,7 @@ impl Scheduler {
             .await
         {
             eprintln!("docker: failed to create {app_name}: {e}");
-            return;
+            return None;
         }
 
         if let Err(e) = self
@@ -150,7 +186,7 @@ impl Scheduler {
             .await
         {
             eprintln!("docker: failed to start {app_name}: {e}");
-            return;
+            return None;
         }
 
         let container_id = self
@@ -161,10 +197,6 @@ impl Scheduler {
             .and_then(|info| info.id)
             .unwrap_or_default();
 
-        if let Err(e) =
-            Registry::save(pool, app_name, image, &container_id, port, "running", None).await
-        {
-            eprintln!("registry: failed to save app {app_name}: {e}");
-        }
+        Some(container_id)
     }
 }
