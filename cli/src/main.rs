@@ -62,6 +62,16 @@ enum AppCommands {
         /// Application name
         name: String,
     },
+    /// Stop a running application
+    Stop {
+        /// Application name
+        name: String,
+    },
+    /// Restart an application
+    Restart {
+        /// Application name
+        name: String,
+    },
     /// Upload a zip of source code to the server
     Upload {
         /// Application name
@@ -148,6 +158,8 @@ async fn main() {
             AppCommands::List => apps::list().await,
             AppCommands::Delete { name } => apps::delete(&name).await,
             AppCommands::Info { name } => apps::info(&name).await,
+            AppCommands::Stop { name } => apps::stop(&name).await,
+            AppCommands::Restart { name } => apps::restart(&name).await,
             AppCommands::Upload { name, source } => apps::upload(&name, &source).await,
             AppCommands::Logs { name } => apps::logs(&name).await,
             AppCommands::Env { command } => match command {

@@ -137,6 +137,42 @@ pub async fn list() -> Result<(), String> {
     Ok(())
 }
 
+// POST /app/{name}/stop — exists
+pub async fn stop(name: &str) -> Result<(), String> {
+    let client = reqwest::Client::new();
+    let resp = client
+        .post(format!("{}/app/{}/stop", api_base(), name))
+        .send()
+        .await
+        .map_err(|e| format!("Request failed: {e}"))?;
+
+    match resp.status().as_u16() {
+        200 => println!("{} App {} stopped", "✓".green(), name.bold()),
+        404 => return Err(format!("App '{}' not found", name)),
+        code => return Err(format!("Server error: {}", code)),
+    }
+
+    Ok(())
+}
+
+// POST /app/{name}/restart — exists
+pub async fn restart(name: &str) -> Result<(), String> {
+    let client = reqwest::Client::new();
+    let resp = client
+        .post(format!("{}/app/{}/restart", api_base(), name))
+        .send()
+        .await
+        .map_err(|e| format!("Request failed: {e}"))?;
+
+    match resp.status().as_u16() {
+        200 => println!("{} App {} restarted", "✓".green(), name.bold()),
+        404 => return Err(format!("App '{}' not found", name)),
+        code => return Err(format!("Server error: {}", code)),
+    }
+
+    Ok(())
+}
+
 // DELETE /app/{name} — NOT implemented on server
 pub async fn delete(name: &str) -> Result<(), String> {
     // TODO: route DELETE /app/{name} not yet implemented on server
