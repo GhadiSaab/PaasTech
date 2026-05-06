@@ -1,7 +1,10 @@
 
 test:
   extends: .rust-base
-  stage: test
+  stage: verify
+  needs:
+    - job: build
+      artifacts: true
   services:
     - name: postgres:16-alpine
       alias: postgres
@@ -14,13 +17,12 @@ test:
     DATABASE_URL: postgresql://paastech:paastech@postgres:5432/paastech
     DOCKER_HOST: tcp://docker:2375
     DOCKER_TLS_CERTDIR: ""
-    SQLX_OFFLINE: "true"
   before_script:
+    - !reference [.rust-base, before_script]
     - apt-get update -qq && apt-get install -y -qq postgresql-client
     - until pg_isready -h postgres -U paastech; do echo "waiting for postgres..."; sleep 2; done
     - psql "$DATABASE_URL" -f database/init.sql
     - until bash -c "</dev/tcp/docker/2375" 2>/dev/null; do echo "waiting for docker..."; sleep 2; done
-    - cargo install cargo-nextest --locked
   script:
     - cargo nextest run --profile ci
   artifacts:

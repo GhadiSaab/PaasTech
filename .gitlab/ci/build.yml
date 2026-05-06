@@ -1,0 +1,19 @@
+
+build:
+  extends: .rust-base
+  stage: build
+  cache:
+    key: "$CI_COMMIT_REF_SLUG"
+    paths:
+      - .cargo/registry/
+      - .cargo/git/
+      - .cargo/bin/
+      - target/
+  script:
+    - cargo install cargo-nextest --locked
+    - cargo nextest run --no-run --profile ci
+  artifacts:
+    paths:
+      - target/
+      - .cargo/bin/
+    expire_in: 2 hours

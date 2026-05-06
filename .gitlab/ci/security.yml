@@ -1,6 +1,6 @@
 audit:
   extends: .rust-base
-  stage: security
+  stage: pre-check
   script:
     - cargo install cargo-audit --locked
     - cargo audit

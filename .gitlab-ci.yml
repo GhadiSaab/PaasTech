@@ -1,22 +1,26 @@
 stages:
-  - lint
-  - test
-  - security
-  - documentation
+  - pre-check
+  - build
+  - verify
 
 variables:
   CARGO_HOME: "$CI_PROJECT_DIR/.cargo"
+  SQLX_OFFLINE: "true"
 
 .rust-base:
   image: rust:1
+  before_script:
+    - export PATH="$CI_PROJECT_DIR/.cargo/bin:$PATH"
   cache:
     key: "$CI_COMMIT_REF_SLUG"
     paths:
-      - .cargo/
-      - target/
+      - .cargo/registry/
+      - .cargo/git/
+      - .cargo/bin/
 
 include:
   - .gitlab/ci/lint.yml
+  - .gitlab/ci/build.yml
   - .gitlab/ci/test.yml
   - .gitlab/ci/security.yml
   - .gitlab/ci/documentation.yml

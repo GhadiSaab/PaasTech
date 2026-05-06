@@ -1,6 +1,9 @@
 rustdoc:
   extends: .rust-base
-  stage: documentation
+  stage: verify
+  needs:
+    - job: build
+      artifacts: true
   script:
     - cargo doc --no-deps
   artifacts:
