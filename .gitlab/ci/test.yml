@@ -20,5 +20,10 @@ test:
     - until pg_isready -h postgres -U paastech; do echo "waiting for postgres..."; sleep 2; done
     - psql "$DATABASE_URL" -f database/init.sql
     - until bash -c "</dev/tcp/docker/2375" 2>/dev/null; do echo "waiting for docker..."; sleep 2; done
+    - cargo install cargo-nextest --locked
   script:
-    - cargo test
+    - cargo nextest run --profile ci
+  artifacts:
+    when: always
+    reports:
+      junit: junit.xml
