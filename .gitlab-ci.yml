@@ -9,10 +9,14 @@ variables:
 .rust-base:
   image: rust:1
   cache:
-    key: "$CI_COMMIT_REF_SLUG"
-    paths:
-      - .cargo/
-      - target/
+    - key:
+        files:
+          - Cargo.lock
+      paths:
+        - .cargo/
+        - target/
+      fallback_keys:
+        - rust-fallback
 
 include:
   - .gitlab/ci/lint.yml

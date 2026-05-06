@@ -2,5 +2,63 @@ audit:
   extends: .rust-base
   stage: security
   script:
+    - apt-get update -qq && apt-get install -y --no-install-recommends jq
     - cargo install cargo-audit --locked
-    - cargo audit
+    - cargo audit --json > cargo-audit-raw.json 2>/dev/null; AUDIT_EXIT=$?
+    - |
+      jq --arg now "$(date -u +%Y-%m-%dT%H:%M:%S)" '{
+        "version": "15.0.7",
+        "scan": {
+          "start_time": $now,
+          "end_time": $now,
+          "status": "success",
+          "type": "dependency_scanning",
+          "analyzer": {
+            "id": "cargo-audit",
+            "name": "cargo-audit",
+            "version": "0.21",
+            "vendor": {"name": "RustSec"}
+          },
+          "scanner": {
+            "id": "cargo-audit",
+            "name": "cargo-audit",
+            "version": "0.21",
+            "vendor": {"name": "RustSec"}
+          }
+        },
+        "dependency_files": [{
+          "path": "Cargo.lock",
+          "package_manager": "cargo",
+          "dependencies": []
+        }],
+        "vulnerabilities": (.vulnerabilities.list // [] | map({
+          "id": .advisory.id,
+          "name": .advisory.title,
+          "description": (.advisory.description // ""),
+          "severity": (.advisory.severity // "unknown" |
+            if . == "critical" then "Critical"
+            elif . == "high" then "High"
+            elif . == "medium" then "Medium"
+            elif . == "low" then "Low"
+            else "Unknown" end),
+          "identifiers": [{
+            "type": "advisory",
+            "name": .advisory.id,
+            "value": .advisory.id,
+            "url": (.advisory.url // "")
+          }],
+          "links": [{"url": (.advisory.url // "")}],
+          "location": {
+            "file": "Cargo.lock",
+            "dependency": {
+              "package": {"name": .package.name},
+              "version": .package.version
+            }
+          }
+        }))
+      }' cargo-audit-raw.json > gl-dependency-scanning-report.json
+    - exit $AUDIT_EXIT
+  artifacts:
+    when: always
+    reports:
+      dependency_scanning: gl-dependency-scanning-report.json
