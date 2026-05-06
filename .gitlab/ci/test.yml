@@ -1,10 +1,9 @@
 
 test:
-  extends: .rust-base
+  extends:
+    - .rust-base
+    - .verify-cache
   stage: verify
-  needs:
-    - job: build
-      artifacts: true
   services:
     - name: postgres:16-alpine
       alias: postgres

@@ -2,6 +2,7 @@ stages:
   - pre-check
   - build
   - verify
+  - documentation
 
 variables:
   CARGO_HOME: "$CI_PROJECT_DIR/.cargo"
@@ -17,6 +18,20 @@ variables:
       - .cargo/registry/
       - .cargo/git/
       - .cargo/bin/
+    policy: pull
+
+.verify-cache:
+  cache:
+    - key: "$CI_COMMIT_REF_SLUG"
+      paths:
+        - .cargo/registry/
+        - .cargo/git/
+        - .cargo/bin/
+      policy: pull
+    - key: "target-$CI_PIPELINE_ID"
+      paths:
+        - target/
+      policy: pull
 
 include:
   - .gitlab/ci/lint.yml

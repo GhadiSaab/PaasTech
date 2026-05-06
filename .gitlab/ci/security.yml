@@ -1,6 +1,7 @@
 audit:
-  extends: .rust-base
-  stage: pre-check
+  extends:
+    - .rust-base
+    - .verify-cache
+  stage: verify
   script:
-    - cargo install cargo-audit --locked
     - cargo audit

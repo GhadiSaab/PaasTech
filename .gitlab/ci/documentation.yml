@@ -1,9 +1,9 @@
+
 rustdoc:
-  extends: .rust-base
-  stage: verify
-  needs:
-    - job: build
-      artifacts: true
+  extends:
+    - .rust-base
+    - .verify-cache
+  stage: documentation
   script:
     - cargo doc --no-deps
   artifacts:

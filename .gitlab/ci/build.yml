@@ -3,17 +3,16 @@ build:
   extends: .rust-base
   stage: build
   cache:
-    key: "$CI_COMMIT_REF_SLUG"
-    paths:
-      - .cargo/registry/
-      - .cargo/git/
-      - .cargo/bin/
-      - target/
+    - key: "$CI_COMMIT_REF_SLUG"
+      paths:
+        - .cargo/registry/
+        - .cargo/git/
+        - .cargo/bin/
+      policy: pull-push
+    - key: "target-$CI_PIPELINE_ID"
+      paths:
+        - target/
+      policy: push
   script:
-    - cargo install cargo-nextest --locked
+    - cargo install cargo-nextest cargo-audit --locked
     - cargo nextest run --no-run --profile ci
-  artifacts:
-    paths:
-      - target/
-      - .cargo/bin/
-    expire_in: 2 hours
