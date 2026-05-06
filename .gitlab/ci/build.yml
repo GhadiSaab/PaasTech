@@ -14,5 +14,6 @@ build:
         - target/
       policy: push
   script:
-    - cargo install cargo-nextest cargo-audit --locked
+    - curl -L --proto '=https' --tlsv1.2 -sSf https://raw.githubusercontent.com/cargo-bins/cargo-binstall/main/install-from-binstall-release.sh | bash
+    - cargo binstall cargo-nextest cargo-audit --no-confirm
     - cargo nextest run --no-run --profile ci
