@@ -156,9 +156,17 @@ async fn main() {
             AppCommands::List => apps::list().await,
             AppCommands::Delete { name } => apps::delete(&name).await,
             AppCommands::Info { name } => apps::info(&name).await,
+<<<<<<< HEAD
             AppCommands::Stop { name } => apps::stop(&name).await,
             AppCommands::Restart { name } => apps::restart(&name).await,
             AppCommands::Upload { source } => apps::upload(&source).await,
+||||||| parent of 44abbdb (feat(cli): add stop and restart commands)
+            AppCommands::Upload { name, source } => apps::upload(&name, &source).await,
+=======
+            AppCommands::Stop { name } => apps::stop(&name).await,
+            AppCommands::Restart { name } => apps::restart(&name).await,
+            AppCommands::Upload { name, source } => apps::upload(&name, &source).await,
+>>>>>>> 44abbdb (feat(cli): add stop and restart commands)
             AppCommands::Logs { name } => apps::logs(&name).await,
             AppCommands::Env { command } => match command {
                 EnvCommands::Set { name, pair } => apps::env_set(&name, &pair).await,
