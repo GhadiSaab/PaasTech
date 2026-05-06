@@ -1,14 +1,14 @@
 
 fmt:
   extends: .rust-base
-  stage: lint
+  stage: validate
   script:
     - rustup component add rustfmt
     - cargo fmt --check
 
 clippy:
   extends: .rust-base
-  stage: lint
+  stage: validate
   script:
     - rustup component add clippy
     - cargo clippy -- -D warnings

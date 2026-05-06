@@ -1,6 +1,6 @@
 audit:
   extends: .rust-base
-  stage: security
+  stage: validate
   script:
     - apt-get update -qq && apt-get install -y --no-install-recommends jq
     - cargo install cargo-audit --locked
