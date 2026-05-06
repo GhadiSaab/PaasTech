@@ -26,4 +26,4 @@ test:
   artifacts:
     when: always
     reports:
-      junit: junit.xml
+      junit: target/nextest/ci/junit.xml
