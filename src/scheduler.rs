@@ -7,15 +7,15 @@ use bollard::query_parameters::{
     StopContainerOptionsBuilder,
 };
 use futures_util::StreamExt;
-use serde::Serialize;
 use futures_util::TryStreamExt;
+use serde::Serialize;
 use sqlx::PgPool;
 use std::collections::HashMap;
 use std::time::Duration;
 
 use crate::registry::Registry;
 
-fn find_free_port() -> Result<u16, std::io::Error> {
+pub(crate) fn find_free_port() -> Result<u16, std::io::Error> {
     let listener = std::net::TcpListener::bind("0.0.0.0:0")?;
     Ok(listener.local_addr()?.port())
 }
@@ -159,11 +159,68 @@ impl Scheduler {
         while stream.next().await.is_some() {}
     }
 
-    pub async fn deploy(&self, app_name: &str, image: &str) -> Option<String> {
-        let image_exists = self.docker.inspect_image(image).await.is_ok();
-        if !image_exists {
-            self.pull(image).await;
-        }
+    async fn create_and_start(
+        &self,
+        app_name: &str,
+        image: &str,
+        internal_port: Option<u16>,
+        host_port: u16,
+    ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+        let (exposed_ports, host_config_body) = match internal_port {
+            Some(cp) => {
+                let port_key = format!("{}/tcp", cp);
+                let mut port_bindings: HashMap<String, Option<Vec<PortBinding>>> = HashMap::new();
+                port_bindings.insert(
+                    port_key.clone(),
+                    Some(vec![PortBinding {
+                        host_ip: Some("0.0.0.0".to_string()),
+                        host_port: Some(host_port.to_string()),
+                    }]),
+                );
+                (
+                    Some(vec![port_key]),
+                    Some(HostConfig {
+                        port_bindings: Some(port_bindings),
+                        ..Default::default()
+                    }),
+                )
+            }
+            None => (None, None),
+        };
+
+        self.docker
+            .create_container(
+                Some(
+                    CreateContainerOptionsBuilder::default()
+                        .name(app_name)
+                        .build(),
+                ),
+                ContainerCreateBody {
+                    image: Some(image.to_string()),
+                    exposed_ports,
+                    host_config: host_config_body,
+                    ..Default::default()
+                },
+            )
+            .await?;
+
+        self.docker
+            .start_container(
+                app_name,
+                Some(StartContainerOptionsBuilder::default().build()),
+            )
+            .await?;
+
+        let container_id = self
+            .docker
+            .inspect_container(app_name, None)
+            .await
+            .ok()
+            .and_then(|info| info.id)
+            .unwrap_or_default();
+
+        Ok(container_id)
+    }
 
     pub async fn start_service(
         &self,
@@ -263,46 +320,91 @@ impl Scheduler {
         Ok(())
     }
 
-    pub async fn deploy(&self, pool: &PgPool, app_name: &str, image: &str, port: i32) {
-        if let Err(e) = self
-            .docker
-            .create_container(
-                Some(
-                    CreateContainerOptionsBuilder::default()
-                        .name(app_name)
-                        .build(),
-                ),
-                ContainerCreateBody {
-                    image: Some(image.to_string()),
-                    ..Default::default()
-                },
-            )
+    pub async fn deploy(
+        &self,
+        pool: &PgPool,
+        app_name: &str,
+        image: &str,
+        internal_port: Option<u16>,
+    ) {
+        self.pull(image).await;
+
+        let host_port = match find_free_port() {
+            Ok(p) => p,
+            Err(e) => {
+                eprintln!("docker: failed to find free port for {app_name}: {e}");
+                return;
+            }
+        };
+
+        let container_id = match self
+            .create_and_start(app_name, image, internal_port, host_port)
             .await
         {
-            eprintln!("docker: failed to create {app_name}: {e}");
-            return None;
-        }
+            Ok(id) => id,
+            Err(e) => {
+                eprintln!("docker: failed to create/start {app_name}: {e}");
+                return;
+            }
+        };
 
-        if let Err(e) = self
+        if let Err(e) = Registry::save(
+            pool,
+            app_name,
+            image,
+            &container_id,
+            internal_port.map(|p| p as i32),
+            host_port as i32,
+            "running",
+        )
+        .await
+        {
+            eprintln!("registry: failed to save app {app_name}: {e}");
+        }
+    }
+
+    pub async fn redeploy(
+        &self,
+        pool: &PgPool,
+        app_name: &str,
+        image: &str,
+        internal_port: Option<u16>,
+        host_port: u16,
+    ) {
+        let _ = self
             .docker
-            .start_container(
+            .stop_container(
                 app_name,
-                Some(StartContainerOptionsBuilder::default().build()),
+                Some(StopContainerOptionsBuilder::default().build()),
             )
+            .await;
+        let _ = self
+            .docker
+            .remove_container(
+                app_name,
+                Some(RemoveContainerOptionsBuilder::default().build()),
+            )
+            .await;
+
+        self.pull(image).await;
+
+        let container_id = match self
+            .create_and_start(app_name, image, internal_port, host_port)
             .await
         {
-            eprintln!("docker: failed to start {app_name}: {e}");
-            return None;
+            Ok(id) => id,
+            Err(e) => {
+                eprintln!("docker: failed to recreate {app_name}: {e}");
+                return;
+            }
+        };
+
+        if let Err(e) = Registry::update_container_id(pool, app_name, &container_id).await {
+            eprintln!("registry: failed to update container_id for {app_name}: {e}");
         }
 
-        let container_id = self
-            .docker
-            .inspect_container(app_name, None)
-            .await
-            .ok()
-            .and_then(|info| info.id)
-            .unwrap_or_default();
-
-        Some(container_id)
+        if let Err(e) = Registry::update_status(pool, app_name, "running").await {
+            eprintln!("registry: failed to update status for {app_name}: {e}");
+        }
     }
 }

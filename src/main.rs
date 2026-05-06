@@ -4,7 +4,8 @@ mod models;
 mod registry;
 mod scheduler;
 
-use crate::engine::{extract_zip, launch_code, save_multipart_file};
+use crate::engine::{MultipartData, extract_zip, launch_code, save_multipart_file};
+use crate::scheduler::find_free_port;
 use actix_multipart::Multipart;
 use actix_web::{
     App, Error, HttpResponse, HttpServer, Responder, delete, error, get, patch, post, put, web,
@@ -15,61 +16,16 @@ use docker::{
     service_port_for_service, validate_docker_tag,
 };
 use models::{CreateResourcePayload, Resource, UpdateResourcePayload};
+use registry::Registry;
 use reqwest::Client;
 use scheduler::Scheduler;
+use serde::Deserialize;
 use sqlx::PgPool;
 use std::collections::HashMap;
 use tokio::fs;
 use utoipa::OpenApi;
 use utoipa_swagger_ui::SwaggerUi;
 use uuid::Uuid;
-
-use registry::Registry;
-use scheduler::Scheduler;
-
-const VALID_SERVICES: &[&str] = &["postgres", "redis", "s3"];
-
-fn docker_image_for_service(name: &str) -> &'static str {
-    match name {
-        "postgres" => "library/postgres",
-        "redis" => "library/redis",
-        "s3" => "dxflrs/garage",
-        _ => unreachable!(),
-    }
-}
-
-async fn validate_docker_tag(client: &Client, image: &str, tag: &str) -> Result<(), Error> {
-    let url = format!(
-        "https://hub.docker.com/v2/repositories/{}/tags/{}/",
-        image, tag
-    );
-    let resp = client
-        .get(&url)
-        .send()
-        .await
-        .map_err(|_| error::ErrorInternalServerError("Failed to reach Docker Hub"))?;
-
-    match resp.status().as_u16() {
-        200 => Ok(()),
-        404 => Err(error::ErrorBadRequest(format!(
-            "Version '{}' does not exist for this service on Docker Hub",
-            tag
-        ))),
-        _ => Err(error::ErrorInternalServerError(
-            "Unexpected response from Docker Hub",
-        )),
-    }
-}
-
-#[derive(Deserialize)]
-struct DockerTagsResponse {
-    results: Vec<DockerTag>,
-}
-
-#[derive(Deserialize)]
-struct DockerTag {
-    name: String,
-}
 
 struct Config {
     host: String,
@@ -104,6 +60,11 @@ async fn init() -> Config {
     paths(
         get_service_versions,
         upload_app,
+        list_apps,
+        deploy_app,
+        stop_app,
+        restart_app,
+        status_app,
         create_resource,
         get_resources,
         get_resource,
@@ -114,7 +75,7 @@ async fn init() -> Config {
         get_resource_env,
         update_resource_env,
     ),
-    components(schemas(Resource, CreateResourcePayload, UpdateResourcePayload)),
+    components(schemas(registry::App, DeployBody, Resource, CreateResourcePayload, UpdateResourcePayload)),
     tags(
         (name = "services", description = "Service version management"),
         (name = "apps", description = "Application management"),
@@ -136,8 +97,6 @@ async fn main() -> std::io::Result<()> {
         .await
         .expect("Failed to connect to PostgreSQL");
 
-    let scheduler = web::Data::new(Scheduler::new());
-
     let http_client = Client::new();
     let scheduler = Scheduler::new();
 
@@ -156,7 +115,6 @@ async fn main() -> std::io::Result<()> {
                     .url("/api-docs/openapi.json", ApiDoc::openapi()),
             )
             .service(get_service_versions)
-            .app_data(scheduler.clone())
             .service(upload_app)
             .service(list_apps)
             .service(deploy_app)
@@ -229,31 +187,71 @@ async fn get_service_versions(
 #[utoipa::path(
     post,
     path = "/app/upload",
-    request_body(content_type = "multipart/form-data", description = "Zip archive of the application"),
+    request_body(content_type = "multipart/form-data", description = "Zip archive of the application. Form fields: file (zip), name (app name), internal_port (container port to expose)"),
     responses(
         (status = 200, description = "File uploaded successfully"),
+        (status = 400, description = "Missing file in payload"),
         (status = 500, description = "Internal server error"),
     ),
     tag = "apps"
 )]
 #[post("/app/upload")]
-async fn upload_app(payload: Multipart) -> Result<impl Responder, Error> {
-    let zip_filepath = match save_multipart_file(payload).await? {
+async fn upload_app(pool: web::Data<PgPool>, payload: Multipart) -> Result<impl Responder, Error> {
+    let MultipartData { file_path, fields } = save_multipart_file(payload).await?;
+
+    let zip_filepath = match file_path {
         Some(path) => path,
         None => return Ok(HttpResponse::BadRequest().body("provide file in payload")),
     };
 
+    let internal_port = fields
+        .get("internal_port")
+        .and_then(|p| p.trim().parse::<u16>().ok());
+
+    let name = fields.get("name").cloned().unwrap_or_else(|| {
+        zip_filepath
+            .file_stem()
+            .map(|s| s.to_string_lossy().to_string())
+            .unwrap_or_else(|| "app".to_string())
+    });
+
+    let host_port = find_free_port()
+        .map_err(|e| error::ErrorInternalServerError(format!("Failed to find free port: {e}")))?;
+
     println!("Zip file uploaded to {:?}", zip_filepath);
 
-    let extracted_folder = extract_zip(zip_filepath).await.expect("extract failed");
+    let extracted_folder = extract_zip(zip_filepath)
+        .await
+        .map_err(error::ErrorInternalServerError)?;
 
     println!("Extraction worked");
 
     launch_code(extracted_folder).await;
 
+    Registry::save(
+        &pool,
+        &name,
+        "",
+        "",
+        internal_port.map(|p| p as i32),
+        host_port as i32,
+        "running",
+    )
+    .await
+    .map_err(error::ErrorInternalServerError)?;
+
     Ok(HttpResponse::Ok().body("worked\n"))
 }
 
+#[utoipa::path(
+    get,
+    path = "/app",
+    responses(
+        (status = 200, description = "List of deployed applications", body = Vec<registry::App>),
+        (status = 500, description = "Internal server error"),
+    ),
+    tag = "apps"
+)]
 #[get("/app")]
 async fn list_apps(pool: web::Data<PgPool>) -> impl Responder {
     match Registry::list(&pool).await {
@@ -265,42 +263,46 @@ async fn list_apps(pool: web::Data<PgPool>) -> impl Responder {
     }
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, utoipa::ToSchema)]
 struct DeployBody {
     name: String,
     image: String,
-    port: i32,
+    port: Option<u16>,
 }
 
+#[utoipa::path(
+    post,
+    path = "/app/deploy",
+    request_body = DeployBody,
+    responses(
+        (status = 200, description = "Application deployed"),
+        (status = 500, description = "Internal server error"),
+    ),
+    tag = "apps"
+)]
 #[post("/app/deploy")]
 async fn deploy_app(
     scheduler: web::Data<Scheduler>,
     pool: web::Data<PgPool>,
     body: web::Json<DeployBody>,
 ) -> impl Responder {
-    let container_id = match scheduler.deploy(&body.name, &body.image).await {
-        Some(id) => id,
-        None => return HttpResponse::InternalServerError().finish(),
-    };
-    match Registry::save(
-        &pool,
-        &body.name,
-        &body.image,
-        &container_id,
-        body.port,
-        "running",
-        None,
-    )
-    .await
-    {
-        Ok(_) => HttpResponse::Ok().finish(),
-        Err(e) => {
-            eprintln!("registry: failed to save app {}: {e}", body.name);
-            HttpResponse::InternalServerError().finish()
-        }
-    }
+    scheduler
+        .deploy(&pool, &body.name, &body.image, body.port)
+        .await;
+    HttpResponse::Ok().finish()
 }
 
+#[utoipa::path(
+    post,
+    path = "/app/{app_name}/stop",
+    params(("app_name" = String, Path, description = "Application name")),
+    responses(
+        (status = 200, description = "Application stopped"),
+        (status = 404, description = "Application not found"),
+        (status = 500, description = "Internal server error"),
+    ),
+    tag = "apps"
+)]
 #[post("/app/{app_name}/stop")]
 async fn stop_app(
     scheduler: web::Data<Scheduler>,
@@ -323,6 +325,17 @@ async fn stop_app(
     HttpResponse::Ok().finish()
 }
 
+#[utoipa::path(
+    post,
+    path = "/app/{app_name}/restart",
+    params(("app_name" = String, Path, description = "Application name")),
+    responses(
+        (status = 200, description = "Application restarted"),
+        (status = 404, description = "Application not found"),
+        (status = 500, description = "Internal server error"),
+    ),
+    tag = "apps"
+)]
 #[post("/app/{app_name}/restart")]
 async fn restart_app(
     scheduler: web::Data<Scheduler>,
@@ -330,21 +343,54 @@ async fn restart_app(
     path: web::Path<String>,
 ) -> impl Responder {
     let app_name = path.into_inner();
-    match Registry::get(&pool, &app_name).await {
-        Ok(Some(_)) => {}
+    let app = match Registry::get(&pool, &app_name).await {
+        Ok(Some(app)) => app,
         Ok(None) => return HttpResponse::NotFound().finish(),
         Err(e) => {
             eprintln!("registry: get failed for {app_name}: {e}");
             return HttpResponse::InternalServerError().finish();
         }
-    }
-    scheduler.restart(&app_name).await;
-    if let Err(e) = Registry::update_status(&pool, &app_name, "running").await {
-        eprintln!("registry: failed to update status for {app_name}: {e}");
-    }
+    };
+
+    let image = match app.image_id.as_deref().filter(|s| !s.is_empty()) {
+        Some(img) => img.to_string(),
+        None => {
+            if let Err(e) = Registry::update_status(&pool, &app_name, "running").await {
+                eprintln!("registry: failed to update status for {app_name}: {e}");
+            }
+            return HttpResponse::Ok().finish();
+        }
+    };
+
+    let internal_port = app.internal_port.map(|p| p as u16);
+    let host_port = match app.port {
+        Some(p) => p as u16,
+        None => match find_free_port() {
+            Ok(p) => p,
+            Err(e) => {
+                eprintln!("docker: failed to find free port for {app_name}: {e}");
+                return HttpResponse::InternalServerError().finish();
+            }
+        },
+    };
+
+    scheduler
+        .redeploy(&pool, &app_name, &image, internal_port, host_port)
+        .await;
     HttpResponse::Ok().finish()
 }
 
+#[utoipa::path(
+    get,
+    path = "/app/{app_name}/status",
+    params(("app_name" = String, Path, description = "Application name")),
+    responses(
+        (status = 200, description = "Application status", body = String),
+        (status = 404, description = "Application not found"),
+        (status = 500, description = "Internal server error"),
+    ),
+    tag = "apps"
+)]
 #[get("/app/{app_name}/status")]
 async fn status_app(
     scheduler: web::Data<Scheduler>,
