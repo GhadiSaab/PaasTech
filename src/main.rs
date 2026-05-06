@@ -2,11 +2,17 @@ mod engine;
 mod registry;
 mod scheduler;
 
-use crate::engine::{extract_zip, launch_code, save_multipart_file};
+use crate::engine::{build_image, extract_zip, run_container, save_multipart_file};
 use actix_multipart::Multipart;
 use actix_web::{App, Error, HttpResponse, HttpServer, Responder, post, web};
+use serde::Deserialize;
 use sqlx::PgPool;
 use tokio::fs;
+
+#[derive(Deserialize)]
+struct UploadQuery {
+    port: u16,
+}
 
 struct Config {
     host: String,
@@ -62,19 +68,28 @@ async fn main() -> std::io::Result<()> {
 // routes
 
 #[post("/app/upload")]
-async fn upload_app(payload: Multipart) -> Result<impl Responder, Error> {
+async fn upload_app(
+    payload: Multipart,
+    query: web::Query<UploadQuery>,
+) -> Result<impl Responder, Error> {
+    let port = query.port;
+
     let zip_filepath = match save_multipart_file(payload).await? {
         Some(path) => path,
         None => return Ok(HttpResponse::BadRequest().body("provide file in payload")),
     };
 
-    println!("Zip file uploaded to {:?}", zip_filepath);
+    let extracted_folder = extract_zip(zip_filepath).await.map_err(|e| {
+        actix_web::error::ErrorInternalServerError(format!("extract failed: {}", e))
+    })?;
 
-    let extracted_folder = extract_zip(zip_filepath).await.expect("extract failed");
+    let image_name = match build_image(extracted_folder).await {
+        Ok(name) => name,
+        Err(e) => return Ok(HttpResponse::BadRequest().body(e)),
+    };
 
-    println!("Extraction worked");
-
-    launch_code(extracted_folder).await;
-
-    Ok(HttpResponse::Ok().body("worked\n"))
+    match run_container(&image_name, port).await {
+        Ok(()) => Ok(HttpResponse::Ok().body("worked\n")),
+        Err(e) => Ok(HttpResponse::BadRequest().body(e)),
+    }
 }
