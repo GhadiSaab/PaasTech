@@ -1,11 +1,12 @@
 use actix_web::rt::time::sleep;
-use bollard::models::ContainerCreateBody;
+use bollard::models::{ContainerCreateBody, HostConfig, PortBinding};
 use bollard::query_parameters::{
     CreateContainerOptionsBuilder, ListContainersOptionsBuilder, RemoveContainerOptionsBuilder,
     RestartContainerOptionsBuilder, StartContainerOptionsBuilder, StopContainerOptionsBuilder,
 };
 use bollard::{API_DEFAULT_VERSION, Docker};
 use sqlx::PgPool;
+use std::collections::HashMap;
 use std::time::Duration;
 
 use crate::registry::Registry;
@@ -125,7 +126,30 @@ impl Scheduler {
         }
     }
 
-    pub async fn deploy(&self, pool: &PgPool, app_name: &str, image: &str, port: i32) {
+    pub async fn deploy(
+        &self,
+        pool: &PgPool,
+        app_name: &str,
+        image: &str,
+        container_port: i32,
+        host_port: i32,
+    ) {
+        let exposed_ports = vec![format!("{}/tcp", container_port)];
+
+        let mut port_bindings = HashMap::new();
+        port_bindings.insert(
+            format!("{}/tcp", container_port),
+            Some(vec![PortBinding {
+                host_ip: Some("0.0.0.0".to_string()),
+                host_port: Some(host_port.to_string()),
+            }]),
+        );
+
+        let host_config = HostConfig {
+            port_bindings: Some(port_bindings),
+            ..Default::default()
+        };
+
         if let Err(e) = self
             .docker
             .create_container(
@@ -136,6 +160,8 @@ impl Scheduler {
                 ),
                 ContainerCreateBody {
                     image: Some(image.to_string()),
+                    exposed_ports: Some(exposed_ports),
+                    host_config: Some(host_config),
                     ..Default::default()
                 },
             )
@@ -165,8 +191,16 @@ impl Scheduler {
             .and_then(|info| info.id)
             .unwrap_or_default();
 
-        if let Err(e) =
-            Registry::save(pool, app_name, image, &container_id, port, "running", None).await
+        if let Err(e) = Registry::save(
+            pool,
+            app_name,
+            image,
+            &container_id,
+            host_port,
+            "running",
+            None,
+        )
+        .await
         {
             eprintln!("registry: failed to save app {app_name}: {e}");
         }

@@ -9,7 +9,21 @@ use actix_web::{App, Error, HttpResponse, HttpServer, Responder, post, web};
 use serde::Deserialize;
 use serde_json::json;
 use sqlx::PgPool;
+use std::net::TcpListener;
 use tokio::fs;
+
+const PORT_RANGE_START: u16 = 30000;
+const PORT_RANGE_END: u16 = 40000;
+
+fn find_available_port() -> Option<u16> {
+    for port in PORT_RANGE_START..=PORT_RANGE_END {
+        if let Ok(listener) = TcpListener::bind(("0.0.0.0", port)) {
+            drop(listener);
+            return Some(port);
+        }
+    }
+    None
+}
 
 #[derive(Deserialize)]
 struct UploadQuery {
@@ -82,7 +96,7 @@ async fn upload_app(
     query: web::Query<UploadQuery>,
     pool: web::Data<PgPool>,
 ) -> Result<impl Responder, Error> {
-    let port = match query.port {
+    let container_port = match query.port {
         Some(p) => p,
         None => {
             return Ok(HttpResponse::BadRequest().json(json!({"error": "missing port parameter"})));
@@ -113,10 +127,25 @@ async fn upload_app(
         Err(e) => return Ok(HttpResponse::BadRequest().json(json!({"error": e}))),
     };
 
+    let host_port = match find_available_port() {
+        Some(p) => p,
+        None => {
+            return Ok(HttpResponse::ServiceUnavailable()
+                .json(json!({"error": "no available host port found in range 30000-40000"})));
+        }
+    };
+
     let scheduler = Scheduler::new();
     scheduler
-        .deploy(pool.get_ref(), &image_name, &image_name, port as i32)
+        .deploy(
+            pool.get_ref(),
+            &image_name,
+            &image_name,
+            container_port as i32,
+            host_port as i32,
+        )
         .await;
 
-    Ok(HttpResponse::Ok().json(json!({"status": "success", "image": image_name})))
+    Ok(HttpResponse::Ok()
+        .json(json!({"status": "success", "image": image_name, "port": host_port})))
 }
