@@ -6,6 +6,7 @@ use crate::engine::{build_image, extract_zip, run_container, save_multipart_file
 use actix_multipart::Multipart;
 use actix_web::{App, Error, HttpResponse, HttpServer, Responder, post, web};
 use serde::Deserialize;
+use serde_json::json;
 use sqlx::PgPool;
 use tokio::fs;
 
@@ -76,7 +77,9 @@ async fn upload_app(
 
     let zip_filepath = match save_multipart_file(payload).await? {
         Some(path) => path,
-        None => return Ok(HttpResponse::BadRequest().body("provide file in payload")),
+        None => {
+            return Ok(HttpResponse::BadRequest().json(json!({"error": "provide file in payload"})));
+        }
     };
 
     let extracted_folder = extract_zip(zip_filepath).await.map_err(|e| {
@@ -85,11 +88,11 @@ async fn upload_app(
 
     let image_name = match build_image(extracted_folder).await {
         Ok(name) => name,
-        Err(e) => return Ok(HttpResponse::BadRequest().body(e)),
+        Err(e) => return Ok(HttpResponse::BadRequest().json(json!({"error": e}))),
     };
 
     match run_container(&image_name, port).await {
-        Ok(()) => Ok(HttpResponse::Ok().body("worked\n")),
-        Err(e) => Ok(HttpResponse::BadRequest().body(e)),
+        Ok(()) => Ok(HttpResponse::Ok().json(json!({"status": "success", "image": image_name}))),
+        Err(e) => Ok(HttpResponse::BadRequest().json(json!({"error": e}))),
     }
 }
