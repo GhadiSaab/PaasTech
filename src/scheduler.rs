@@ -1,10 +1,10 @@
 use actix_web::rt::time::sleep;
-use bollard::Docker;
 use bollard::models::ContainerCreateBody;
 use bollard::query_parameters::{
     CreateContainerOptionsBuilder, ListContainersOptionsBuilder, RemoveContainerOptionsBuilder,
     RestartContainerOptionsBuilder, StartContainerOptionsBuilder, StopContainerOptionsBuilder,
 };
+use bollard::{API_DEFAULT_VERSION, Docker};
 use sqlx::PgPool;
 use std::time::Duration;
 
@@ -19,7 +19,11 @@ pub struct Scheduler {
 impl Scheduler {
     pub fn new() -> Self {
         let docker =
-            Docker::connect_with_defaults().expect("Impossible de se connecter au Docker Engine");
+            Docker::connect_with_unix("/run/user/1000/docker.sock", 120, API_DEFAULT_VERSION)
+                .unwrap_or_else(|_| {
+                    Docker::connect_with_defaults()
+                        .expect("Impossible de se connecter au Docker Engine")
+                });
         Self { docker }
     }
 

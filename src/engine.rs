@@ -72,7 +72,11 @@ pub async fn build_image(from: PathBuf) -> Result<String, String> {
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(format!("Build failed:\n{}", stderr));
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        return Err(format!(
+            "Build failed with exit code {}:\n--- stderr ---\n{}\n--- stdout ---\n{}",
+            output.status, stderr, stdout
+        ));
     }
 
     Ok(image_name)
