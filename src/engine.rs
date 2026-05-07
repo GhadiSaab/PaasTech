@@ -77,28 +77,3 @@ pub async fn build_image(from: PathBuf) -> Result<String, String> {
 
     Ok(image_name)
 }
-
-pub async fn run_container(image_name: &str, port: u16) -> Result<(), String> {
-    let output = TokioCommand::new("docker")
-        .args([
-            "run",
-            "-d",
-            "-p",
-            &format!("8081:{}", port),
-            "--env",
-            &format!("PORT={}", port),
-            "--name",
-            image_name,
-            image_name,
-        ])
-        .output()
-        .await
-        .map_err(|e| format!("Failed to run container: {}", e))?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(format!("Container failed to start:\n{}", stderr));
-    }
-
-    Ok(())
-}

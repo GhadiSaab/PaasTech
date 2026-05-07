@@ -2,7 +2,8 @@ mod engine;
 mod registry;
 mod scheduler;
 
-use crate::engine::{build_image, extract_zip, run_container, save_multipart_file};
+use crate::engine::{build_image, extract_zip, save_multipart_file};
+use crate::scheduler::Scheduler;
 use actix_multipart::Multipart;
 use actix_web::{App, Error, HttpResponse, HttpServer, Responder, post, web};
 use serde::Deserialize;
@@ -72,6 +73,7 @@ async fn main() -> std::io::Result<()> {
 async fn upload_app(
     payload: Multipart,
     query: web::Query<UploadQuery>,
+    pool: web::Data<PgPool>,
 ) -> Result<impl Responder, Error> {
     let port = query.port;
 
@@ -91,8 +93,10 @@ async fn upload_app(
         Err(e) => return Ok(HttpResponse::BadRequest().json(json!({"error": e}))),
     };
 
-    match run_container(&image_name, port).await {
-        Ok(()) => Ok(HttpResponse::Ok().json(json!({"status": "success", "image": image_name}))),
-        Err(e) => Ok(HttpResponse::BadRequest().json(json!({"error": e}))),
-    }
+    let scheduler = Scheduler::new();
+    scheduler
+        .deploy(pool.get_ref(), &image_name, &image_name, port as i32)
+        .await;
+
+    Ok(HttpResponse::Ok().json(json!({"status": "success", "image": image_name})))
 }
