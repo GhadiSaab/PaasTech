@@ -6,6 +6,7 @@ RUN apt-get update && apt-get install -y pkg-config libssl-dev && rm -rf /var/li
 
 COPY Cargo.toml Cargo.lock ./
 COPY src ./src
+COPY services ./services
 COPY .sqlx ./.sqlx
 ENV SQLX_OFFLINE=true
 RUN cargo build --release
