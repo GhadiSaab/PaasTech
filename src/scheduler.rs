@@ -20,6 +20,40 @@ pub(crate) fn find_free_port() -> Result<u16, std::io::Error> {
     Ok(listener.local_addr()?.port())
 }
 
+fn paas_net() -> HashMap<String, EndpointSettings> {
+    let mut m = HashMap::new();
+    m.insert("paas-net".to_string(), EndpointSettings::default());
+    m
+}
+
+fn traefik_labels(app_name: &str, internal_port: Option<u16>) -> HashMap<String, String> {
+    let version = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+        .to_string();
+    let service_name = format!("{app_name}-{version}");
+    let container_port = internal_port.unwrap_or(8000);
+    let base_domain =
+        std::env::var("BASE_DOMAIN").unwrap_or_else(|_| "localhost".to_string());
+
+    let mut labels = HashMap::new();
+    labels.insert("traefik.enable".to_string(), "true".to_string());
+    labels.insert(
+        format!("traefik.http.routers.{app_name}.rule"),
+        format!("Host(`{app_name}.{base_domain}`)"),
+    );
+    labels.insert(
+        format!("traefik.http.routers.{app_name}.service"),
+        service_name.clone(),
+    );
+    labels.insert(
+        format!("traefik.http.services.{service_name}.loadbalancer.server.port"),
+        container_port.to_string(),
+    );
+    labels
+}
+
 #[derive(Clone)]
 pub struct Scheduler {
     docker: Docker,
@@ -165,7 +199,7 @@ impl Scheduler {
         image: &str,
         internal_port: Option<u16>,
         host_port: u16,
-        labels: Option<HashMap<String, String>>,
+        labels: HashMap<String, String>,
     ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
         let (exposed_ports, host_config_body) = match internal_port {
             Some(cp) => {
@@ -189,9 +223,6 @@ impl Scheduler {
             None => (None, None),
         };
 
-        let mut networking_config: HashMap<String, EndpointSettings> = HashMap::new();
-        networking_config.insert("paas-net".to_string(), EndpointSettings::default());
-
         self.docker
             .create_container(
                 Some(
@@ -203,9 +234,9 @@ impl Scheduler {
                     image: Some(image.to_string()),
                     exposed_ports,
                     host_config: host_config_body,
-                    labels,
+                    labels: Some(labels),
                     networking_config: Some(bollard::models::NetworkingConfig {
-                        endpoints_config: Some(networking_config),
+                        endpoints_config: Some(paas_net()),
                     }),
                     ..Default::default()
                 },
@@ -287,6 +318,9 @@ impl Scheduler {
                         binds: if binds.is_empty() { None } else { Some(binds) },
                         ..Default::default()
                     }),
+                    networking_config: Some(bollard::models::NetworkingConfig {
+                        endpoints_config: Some(paas_net()),
+                    }),
                     ..Default::default()
                 },
             )
@@ -335,6 +369,22 @@ impl Scheduler {
         image: &str,
         internal_port: Option<u16>,
     ) {
+        // Stop and remove any existing container with this name before creating a new one.
+        let _ = self
+            .docker
+            .stop_container(
+                app_name,
+                Some(StopContainerOptionsBuilder::default().build()),
+            )
+            .await;
+        let _ = self
+            .docker
+            .remove_container(
+                app_name,
+                Some(RemoveContainerOptionsBuilder::default().build()),
+            )
+            .await;
+
         self.pull(image).await;
 
         let host_port = match find_free_port() {
@@ -345,30 +395,10 @@ impl Scheduler {
             }
         };
 
-        let version = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs()
-            .to_string();
-        let service_name = format!("{app_name}-{version}");
-        let container_port = internal_port.unwrap_or(8000);
-        let mut labels = HashMap::new();
-        labels.insert("traefik.enable".to_string(), "true".to_string());
-        labels.insert(
-            format!("traefik.http.routers.{app_name}.rule"),
-            format!("Host(`{app_name}.localhost`)"),
-        );
-        labels.insert(
-            format!("traefik.http.routers.{app_name}.service"),
-            service_name.clone(),
-        );
-        labels.insert(
-            format!("traefik.http.services.{service_name}.loadbalancer.server.port"),
-            container_port.to_string(),
-        );
+        let labels = traefik_labels(app_name, internal_port);
 
         let container_id = match self
-            .create_and_start(app_name, image, internal_port, host_port, Some(labels))
+            .create_and_start(app_name, image, internal_port, host_port, labels)
             .await
         {
             Ok(id) => id,
@@ -418,8 +448,10 @@ impl Scheduler {
 
         self.pull(image).await;
 
+        let labels = traefik_labels(app_name, internal_port);
+
         let container_id = match self
-            .create_and_start(app_name, image, internal_port, host_port, None)
+            .create_and_start(app_name, image, internal_port, host_port, labels)
             .await
         {
             Ok(id) => id,
