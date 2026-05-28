@@ -113,12 +113,20 @@ fn spinner(msg: &str) -> ProgressBar {
 }
 
 // POST /app/deploy — exists
+<<<<<<< HEAD
 fn prompt_for_port() -> Result<u16, String> {
     loop {
         print!("Internal application port: ");
         io::stdout()
             .flush()
             .map_err(|e| format!("Failed to write prompt: {e}"))?;
+||||||| parent of 8a710c9 (fix(cli): restrict port to valid range with u16 and value_parser)
+pub async fn deploy(name: &str, image: &str, port: i32) -> Result<(), String> {
+    let pb = spinner(&format!("Deploying {} ({})", name, image));
+=======
+pub async fn deploy(name: &str, image: &str, port: u16) -> Result<(), String> {
+    let pb = spinner(&format!("Deploying {} ({})", name, image));
+>>>>>>> 8a710c9 (fix(cli): restrict port to valid range with u16 and value_parser)
 
         let mut input = String::new();
         io::stdin()
