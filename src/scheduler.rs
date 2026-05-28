@@ -34,8 +34,7 @@ fn traefik_labels(app_name: &str, internal_port: Option<u16>) -> HashMap<String,
         .to_string();
     let service_name = format!("{app_name}-{version}");
     let container_port = internal_port.unwrap_or(8000);
-    let base_domain =
-        std::env::var("BASE_DOMAIN").unwrap_or_else(|_| "localhost".to_string());
+    let base_domain = std::env::var("BASE_DOMAIN").unwrap_or_else(|_| "localhost".to_string());
 
     let mut labels = HashMap::new();
     labels.insert("traefik.enable".to_string(), "true".to_string());
