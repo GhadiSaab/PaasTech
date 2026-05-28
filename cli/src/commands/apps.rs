@@ -83,7 +83,7 @@ fn spinner(msg: &str) -> ProgressBar {
 }
 
 // POST /app/deploy — exists
-pub async fn deploy(name: &str, image: &str, port: i32) -> Result<(), String> {
+pub async fn deploy(name: &str, image: &str, port: u16) -> Result<(), String> {
     let pb = spinner(&format!("Deploying {} ({})", name, image));
 
     let client = reqwest::Client::new();
