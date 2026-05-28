@@ -351,6 +351,7 @@ impl Scheduler {
             .as_secs()
             .to_string();
         let service_name = format!("{app_name}-{version}");
+        let container_port = internal_port.unwrap_or(8000);
         let mut labels = HashMap::new();
         labels.insert("traefik.enable".to_string(), "true".to_string());
         labels.insert(
@@ -363,7 +364,7 @@ impl Scheduler {
         );
         labels.insert(
             format!("traefik.http.services.{service_name}.loadbalancer.server.port"),
-            "8000".to_string(),
+            container_port.to_string(),
         );
 
         let container_id = match self
