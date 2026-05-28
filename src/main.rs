@@ -11,9 +11,9 @@ use actix_web::{
     App, Error, HttpResponse, HttpServer, Responder, delete, error, get, patch, post, put, web,
 };
 use docker::{
-    VALID_SERVICES, container_image_for_service, default_env_vars_for_service,
-    docker_image_for_service, fetch_service_versions, prepare_config_for_service,
-    service_port_for_service, validate_docker_tag,
+    container_image_for_service, default_env_vars_for_service, docker_image_for_service,
+    fetch_service_versions, is_valid_service, prepare_config_for_service, service_port_for_service,
+    valid_services, validate_docker_tag,
 };
 use models::{CreateResourcePayload, Resource, UpdateResourcePayload};
 use registry::Registry;
@@ -172,11 +172,11 @@ async fn get_service_versions(
     client: web::Data<Client>,
     name: web::Path<String>,
 ) -> Result<impl Responder, Error> {
-    if !VALID_SERVICES.contains(&name.as_str()) {
+    if !is_valid_service(&name) {
         return Err(error::ErrorBadRequest(format!(
             "Invalid service name '{}'. Must be one of: {}",
             name,
-            VALID_SERVICES.join(", ")
+            valid_services().join(", ")
         )));
     }
 
@@ -431,11 +431,11 @@ async fn create_resource(
     scheduler: web::Data<Scheduler>,
     payload: web::Json<CreateResourcePayload>,
 ) -> Result<impl Responder, Error> {
-    if !VALID_SERVICES.contains(&payload.name.as_str()) {
+    if !is_valid_service(&payload.name) {
         return Err(error::ErrorBadRequest(format!(
             "Invalid service name '{}'. Must be one of: {}",
             payload.name,
-            VALID_SERVICES.join(", ")
+            valid_services().join(", ")
         )));
     }
 

@@ -1,0 +1,32 @@
+{
+  "postgres": {
+    "docker_image": "library/postgres",
+    "container_image": "postgres",
+    "port": 5432,
+    "env_vars": [
+      { "key": "POSTGRES_USER", "value": "postgres" },
+      { "key": "POSTGRES_PASSWORD", "value": "postgres" },
+      { "key": "POSTGRES_DB", "value": "postgres" }
+    ]
+  },
+  "redis": {
+    "docker_image": "library/redis",
+    "container_image": "redis",
+    "port": 6379,
+    "env_vars": [
+      { "key": "REDIS_PASSWORD", "value": "redis" }
+    ]
+  },
+  "s3": {
+    "docker_image": "dxflrs/garage",
+    "container_image": "dxflrs/garage",
+    "port": 3900,
+    "env_vars": [
+      { "key": "GARAGE_RPC_SECRET", "generate": "uuid_hex64" }
+    ],
+    "config_file": {
+      "template": "garage.toml",
+      "container_path": "/etc/garage.toml"
+    }
+  }
+}
