@@ -137,11 +137,20 @@ pub async fn list() -> Result<(), String> {
     Ok(())
 }
 
+fn app_url(name: &str, action: &str) -> Result<reqwest::Url, String> {
+    let mut url = reqwest::Url::parse(&api_base()).map_err(|e| format!("Invalid API URL: {e}"))?;
+    url.path_segments_mut()
+        .map_err(|_| "API URL cannot be a base".to_string())?
+        .extend(&["app", name, action]);
+    Ok(url)
+}
+
 // POST /app/{name}/stop — exists
 pub async fn stop(name: &str) -> Result<(), String> {
+    let url = app_url(name, "stop")?;
     let client = reqwest::Client::new();
     let resp = client
-        .post(format!("{}/app/{}/stop", api_base(), name))
+        .post(url)
         .send()
         .await
         .map_err(|e| format!("Request failed: {e}"))?;
@@ -157,9 +166,10 @@ pub async fn stop(name: &str) -> Result<(), String> {
 
 // POST /app/{name}/restart — exists
 pub async fn restart(name: &str) -> Result<(), String> {
+    let url = app_url(name, "restart")?;
     let client = reqwest::Client::new();
     let resp = client
-        .post(format!("{}/app/{}/restart", api_base(), name))
+        .post(url)
         .send()
         .await
         .map_err(|e| format!("Request failed: {e}"))?;
@@ -184,7 +194,8 @@ pub async fn delete(name: &str) -> Result<(), String> {
 // GET /app/{name} — NOT implemented on server (only GET /app/{name}/status exists)
 pub async fn info(name: &str) -> Result<(), String> {
     // Status exists: GET /app/{name}/status
-    let resp = reqwest::get(format!("{}/app/{}/status", api_base(), name))
+    let url = app_url(name, "status")?;
+    let resp = reqwest::get(url)
         .await
         .map_err(|e| format!("Request failed: {e}"))?;
 
