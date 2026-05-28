@@ -16,3 +16,6 @@ dotenvy = "0.15"
 serde = { version = "1.0.228", features = ["derive"] }
 chrono = { version = "0.4.44", features = ["serde"] }
 zip-extract = "0.2.1"
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
+utoipa = { version = "5.4.0", features = ["actix_extras"] }
+utoipa-swagger-ui = { version = "8", features = ["actix-web"] }

@@ -1,11 +1,17 @@
 use super::*;
 use crate::registry::Registry;
 use actix_web::test;
+use reqwest::Client;
 use serde_json::json;
 use sqlx::PgPool;
+use uuid::Uuid;
 
 fn build_scheduler() -> web::Data<Scheduler> {
     web::Data::new(Scheduler::new())
+}
+
+fn build_client() -> web::Data<Client> {
+    web::Data::new(Client::new())
 }
 
 async fn build_pool() -> web::Data<PgPool> {
@@ -18,6 +24,44 @@ async fn build_pool() -> web::Data<PgPool> {
             .expect("Failed to connect to test DB"),
     )
 }
+
+async fn cleanup_app(pool: &PgPool, name: &str) {
+    sqlx::query("DELETE FROM applications WHERE name = $1")
+        .bind(name)
+        .execute(pool)
+        .await
+        .ok();
+}
+
+async fn insert_test_resource(
+    pool: &PgPool,
+    display_name: &str,
+    service_name: &str,
+    version: &str,
+) -> Uuid {
+    let id = Uuid::new_v4();
+    sqlx::query(
+        "INSERT INTO services (id, display_name, name, version, status) VALUES ($1, $2, $3, $4, 'stopped')",
+    )
+    .bind(id)
+    .bind(display_name)
+    .bind(service_name)
+    .bind(version)
+    .execute(pool)
+    .await
+    .expect("Failed to insert test resource");
+    id
+}
+
+async fn cleanup_resource(pool: &PgPool, id: Uuid) {
+    sqlx::query("DELETE FROM services WHERE id = $1")
+        .bind(id)
+        .execute(pool)
+        .await
+        .ok();
+}
+
+// ── App tests ────────────────────────────────────────────────────────────────
 
 #[actix_web::test]
 async fn test_db_connection() {
@@ -52,6 +96,8 @@ async fn test_deploy_app() {
     let pool = build_pool().await;
     let app_name = "test-deploy-app";
 
+    cleanup_app(pool.get_ref(), app_name).await;
+
     let app = test::init_service(
         App::new()
             .app_data(scheduler.clone())
@@ -72,6 +118,8 @@ async fn test_deploy_app() {
         .uri(&format!("/app/{}/stop", app_name))
         .to_request();
     test::call_service(&app, req).await;
+
+    cleanup_app(pool.get_ref(), app_name).await;
 }
 
 #[actix_web::test]
@@ -80,19 +128,32 @@ async fn test_stop_app() {
     let pool = build_pool().await;
     let app_name = "test-stop-app";
 
-    if let Some(container_id) = scheduler.deploy(app_name, "hello-world").await {
-        Registry::save(
-            &pool,
-            app_name,
-            "hello-world",
-            &container_id,
-            8081,
-            "running",
-            None,
-        )
+    cleanup_app(pool.get_ref(), app_name).await;
+    Registry::save(pool.get_ref(), app_name, "", "", None, 9001, "running")
         .await
-        .ok();
-    }
+        .unwrap();
+
+    let app = test::init_service(
+        App::new()
+            .app_data(scheduler)
+            .app_data(pool.clone())
+            .service(stop_app),
+    )
+    .await;
+
+    let req = test::TestRequest::post()
+        .uri(&format!("/app/{}/stop", app_name))
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status(), 200);
+
+    cleanup_app(pool.get_ref(), app_name).await;
+}
+
+#[actix_web::test]
+async fn test_stop_app_not_found() {
+    let scheduler = build_scheduler();
+    let pool = build_pool().await;
 
     let app = test::init_service(
         App::new()
@@ -103,10 +164,10 @@ async fn test_stop_app() {
     .await;
 
     let req = test::TestRequest::post()
-        .uri(&format!("/app/{}/stop", app_name))
+        .uri("/app/nonexistent-app-xyz/stop")
         .to_request();
     let resp = test::call_service(&app, req).await;
-    assert_eq!(resp.status(), 200);
+    assert_eq!(resp.status(), 404);
 }
 
 #[actix_web::test]
@@ -115,26 +176,17 @@ async fn test_restart_app() {
     let pool = build_pool().await;
     let app_name = "test-restart-app";
 
-    if let Some(container_id) = scheduler.deploy(app_name, "hello-world").await {
-        Registry::save(
-            &pool,
-            app_name,
-            "hello-world",
-            &container_id,
-            8082,
-            "running",
-            None,
-        )
+    cleanup_app(pool.get_ref(), app_name).await;
+    // image_id vide → redeploy prend le chemin "pas de Docker"
+    Registry::save(pool.get_ref(), app_name, "", "", None, 9002, "running")
         .await
-        .ok();
-    }
+        .unwrap();
 
     let app = test::init_service(
         App::new()
             .app_data(scheduler.clone())
             .app_data(pool.clone())
-            .service(restart_app)
-            .service(stop_app),
+            .service(restart_app),
     )
     .await;
 
@@ -144,10 +196,27 @@ async fn test_restart_app() {
     let resp = test::call_service(&app, req).await;
     assert_eq!(resp.status(), 200);
 
+    cleanup_app(pool.get_ref(), app_name).await;
+}
+
+#[actix_web::test]
+async fn test_restart_app_not_found() {
+    let scheduler = build_scheduler();
+    let pool = build_pool().await;
+
+    let app = test::init_service(
+        App::new()
+            .app_data(scheduler)
+            .app_data(pool)
+            .service(restart_app),
+    )
+    .await;
+
     let req = test::TestRequest::post()
-        .uri(&format!("/app/{}/stop", app_name))
+        .uri("/app/nonexistent-app-xyz/restart")
         .to_request();
-    test::call_service(&app, req).await;
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status(), 404);
 }
 
 #[actix_web::test]
@@ -156,26 +225,16 @@ async fn test_status_app() {
     let pool = build_pool().await;
     let app_name = "test-status-app";
 
-    if let Some(container_id) = scheduler.deploy(app_name, "hello-world").await {
-        Registry::save(
-            &pool,
-            app_name,
-            "hello-world",
-            &container_id,
-            8083,
-            "running",
-            None,
-        )
+    cleanup_app(pool.get_ref(), app_name).await;
+    Registry::save(pool.get_ref(), app_name, "", "", None, 9003, "running")
         .await
-        .ok();
-    }
+        .unwrap();
 
     let app = test::init_service(
         App::new()
             .app_data(scheduler.clone())
             .app_data(pool.clone())
-            .service(status_app)
-            .service(stop_app),
+            .service(status_app),
     )
     .await;
 
@@ -189,8 +248,278 @@ async fn test_status_app() {
     let status = String::from_utf8(body.to_vec()).unwrap();
     assert!(!status.is_empty());
 
-    let req = test::TestRequest::post()
-        .uri(&format!("/app/{}/stop", app_name))
+    cleanup_app(pool.get_ref(), app_name).await;
+}
+
+#[actix_web::test]
+async fn test_status_app_not_found() {
+    let scheduler = build_scheduler();
+    let pool = build_pool().await;
+
+    let app = test::init_service(
+        App::new()
+            .app_data(scheduler)
+            .app_data(pool)
+            .service(status_app),
+    )
+    .await;
+
+    let req = test::TestRequest::get()
+        .uri("/app/nonexistent-app-xyz/status")
         .to_request();
-    test::call_service(&app, req).await;
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status(), 404);
+}
+
+// ── Resource tests ────────────────────────────────────────────────────────────
+
+#[actix_web::test]
+async fn test_get_resources() {
+    let pool = build_pool().await;
+    let app = test::init_service(App::new().app_data(pool).service(get_resources)).await;
+
+    let req = test::TestRequest::get().uri("/resource").to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status(), 200);
+}
+
+#[actix_web::test]
+async fn test_create_resource_invalid_service() {
+    let pool = build_pool().await;
+
+    let app = test::init_service(
+        App::new()
+            .app_data(pool)
+            .app_data(build_client())
+            .app_data(build_scheduler())
+            .service(create_resource),
+    )
+    .await;
+
+    let req = test::TestRequest::post()
+        .uri("/resource")
+        .set_json(json!({"display_name": "My DB", "name": "mysql", "version": "8.0"}))
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status(), 400);
+}
+
+#[actix_web::test]
+async fn test_get_resource_not_found() {
+    let pool = build_pool().await;
+
+    let app = test::init_service(App::new().app_data(pool).service(get_resource)).await;
+
+    let req = test::TestRequest::get()
+        .uri(&format!("/resource/{}", Uuid::new_v4()))
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status(), 404);
+}
+
+#[actix_web::test]
+async fn test_get_resource_invalid_uuid() {
+    let pool = build_pool().await;
+
+    let app = test::init_service(App::new().app_data(pool).service(get_resource)).await;
+
+    let req = test::TestRequest::get()
+        .uri("/resource/not-a-uuid")
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status(), 400);
+}
+
+#[actix_web::test]
+async fn test_get_resource() {
+    let pool = build_pool().await;
+    let id = insert_test_resource(pool.get_ref(), "Test Postgres", "postgres", "16").await;
+
+    let app = test::init_service(App::new().app_data(pool.clone()).service(get_resource)).await;
+
+    let req = test::TestRequest::get()
+        .uri(&format!("/resource/{}", id))
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status(), 200);
+
+    let body: serde_json::Value = test::read_body_json(resp).await;
+    assert_eq!(body["name"], "postgres");
+    assert_eq!(body["version"], "16");
+
+    cleanup_resource(pool.get_ref(), id).await;
+}
+
+#[actix_web::test]
+async fn test_update_resource_display_name() {
+    let pool = build_pool().await;
+    let id = insert_test_resource(pool.get_ref(), "Old Name", "redis", "7").await;
+
+    let app = test::init_service(
+        App::new()
+            .app_data(pool.clone())
+            .app_data(build_client())
+            .service(update_resource),
+    )
+    .await;
+
+    let req = test::TestRequest::patch()
+        .uri(&format!("/resource/{}", id))
+        .set_json(json!({"display_name": "New Name"}))
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status(), 200);
+
+    cleanup_resource(pool.get_ref(), id).await;
+}
+
+#[actix_web::test]
+async fn test_update_resource_not_found() {
+    let pool = build_pool().await;
+
+    let app = test::init_service(
+        App::new()
+            .app_data(pool)
+            .app_data(build_client())
+            .service(update_resource),
+    )
+    .await;
+
+    let req = test::TestRequest::patch()
+        .uri(&format!("/resource/{}", Uuid::new_v4()))
+        .set_json(json!({"display_name": "Ghost"}))
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status(), 404);
+}
+
+#[actix_web::test]
+async fn test_delete_resource() {
+    let pool = build_pool().await;
+    let id = insert_test_resource(pool.get_ref(), "To Delete", "postgres", "15").await;
+
+    let app = test::init_service(App::new().app_data(pool).service(delete_resource)).await;
+
+    let req = test::TestRequest::delete()
+        .uri(&format!("/resource/{}", id))
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status(), 204);
+}
+
+#[actix_web::test]
+async fn test_delete_resource_not_found() {
+    let pool = build_pool().await;
+
+    let app = test::init_service(App::new().app_data(pool).service(delete_resource)).await;
+
+    let req = test::TestRequest::delete()
+        .uri(&format!("/resource/{}", Uuid::new_v4()))
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status(), 404);
+}
+
+#[actix_web::test]
+async fn test_get_resource_env() {
+    let pool = build_pool().await;
+    let id = insert_test_resource(pool.get_ref(), "Env Test", "redis", "7").await;
+
+    let app = test::init_service(App::new().app_data(pool.clone()).service(get_resource_env)).await;
+
+    let req = test::TestRequest::get()
+        .uri(&format!("/resource/{}/env", id))
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status(), 200);
+
+    let body: serde_json::Value = test::read_body_json(resp).await;
+    assert!(body.is_object());
+
+    cleanup_resource(pool.get_ref(), id).await;
+}
+
+#[actix_web::test]
+async fn test_update_and_get_resource_env() {
+    let pool = build_pool().await;
+    let id = insert_test_resource(pool.get_ref(), "Env Update Test", "postgres", "16").await;
+
+    let app = test::init_service(
+        App::new()
+            .app_data(pool.clone())
+            .service(update_resource_env)
+            .service(get_resource_env),
+    )
+    .await;
+
+    let req = test::TestRequest::put()
+        .uri(&format!("/resource/{}/env", id))
+        .set_json(json!({"MY_VAR": "hello", "OTHER": "world"}))
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status(), 200);
+
+    let req = test::TestRequest::get()
+        .uri(&format!("/resource/{}/env", id))
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    let body: serde_json::Value = test::read_body_json(resp).await;
+    assert_eq!(body["MY_VAR"], "hello");
+    assert_eq!(body["OTHER"], "world");
+
+    cleanup_resource(pool.get_ref(), id).await;
+}
+
+#[actix_web::test]
+async fn test_stop_resource_already_stopped() {
+    let pool = build_pool().await;
+    let scheduler = build_scheduler();
+    let id = insert_test_resource(pool.get_ref(), "Already Stopped", "redis", "7").await;
+
+    let app = test::init_service(
+        App::new()
+            .app_data(pool.clone())
+            .app_data(scheduler)
+            .service(stop_resource),
+    )
+    .await;
+
+    let req = test::TestRequest::post()
+        .uri(&format!("/resource/{}/stop", id))
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status(), 409);
+
+    cleanup_resource(pool.get_ref(), id).await;
+}
+
+#[actix_web::test]
+async fn test_start_resource_already_running() {
+    let pool = build_pool().await;
+    let scheduler = build_scheduler();
+    let id = Uuid::new_v4();
+
+    sqlx::query(
+        "INSERT INTO services (id, display_name, name, version, status) VALUES ($1, 'Running Redis', 'redis', '7', 'running')",
+    )
+    .bind(id)
+    .execute(pool.get_ref())
+    .await
+    .unwrap();
+
+    let app = test::init_service(
+        App::new()
+            .app_data(pool.clone())
+            .app_data(scheduler)
+            .service(start_resource),
+    )
+    .await;
+
+    let req = test::TestRequest::post()
+        .uri(&format!("/resource/{}/start", id))
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status(), 409);
+
+    cleanup_resource(pool.get_ref(), id).await;
 }
