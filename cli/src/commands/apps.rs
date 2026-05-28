@@ -213,7 +213,7 @@ pub async fn info(name: &str) -> Result<(), String> {
 }
 
 // POST /app/upload — exists
-pub async fn upload(name: &str, source: &str) -> Result<(), String> {
+pub async fn upload(source: &str) -> Result<(), String> {
     let path = std::path::Path::new(source);
 
     if !path.exists() {
@@ -223,7 +223,7 @@ pub async fn upload(name: &str, source: &str) -> Result<(), String> {
         return Err("Source must be a .zip file".to_string());
     }
 
-    let pb = spinner(&format!("Uploading {}...", name));
+    let pb = spinner("Uploading...");
 
     let file_bytes = tokio::fs::read(path)
         .await
@@ -253,7 +253,7 @@ pub async fn upload(name: &str, source: &str) -> Result<(), String> {
     pb.finish_and_clear();
 
     if resp.status().is_success() {
-        println!("{} Uploaded {} successfully", "✓".green(), name.bold());
+        println!("{} Uploaded successfully", "✓".green());
     } else {
         let status = resp.status();
         let text = resp.text().await.unwrap_or_default();

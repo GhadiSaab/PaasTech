@@ -74,8 +74,6 @@ enum AppCommands {
     },
     /// Upload a zip of source code to the server
     Upload {
-        /// Application name
-        name: String,
         /// Path to the zip file
         #[arg(long)]
         source: String,
@@ -160,7 +158,7 @@ async fn main() {
             AppCommands::Info { name } => apps::info(&name).await,
             AppCommands::Stop { name } => apps::stop(&name).await,
             AppCommands::Restart { name } => apps::restart(&name).await,
-            AppCommands::Upload { name, source } => apps::upload(&name, &source).await,
+            AppCommands::Upload { source } => apps::upload(&source).await,
             AppCommands::Logs { name } => apps::logs(&name).await,
             AppCommands::Env { command } => match command {
                 EnvCommands::Set { name, pair } => apps::env_set(&name, &pair).await,
