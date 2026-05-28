@@ -1,6 +1,6 @@
 use actix_web::rt::time::sleep;
 use bollard::Docker;
-use bollard::models::{ContainerCreateBody, HostConfig, PortBinding};
+use bollard::models::{ContainerCreateBody, EndpointSettings, HostConfig, PortBinding};
 use bollard::query_parameters::{
     CreateContainerOptionsBuilder, CreateImageOptionsBuilder, ListContainersOptionsBuilder,
     RemoveContainerOptionsBuilder, RestartContainerOptionsBuilder, StartContainerOptionsBuilder,
@@ -11,7 +11,7 @@ use futures_util::TryStreamExt;
 use serde::Serialize;
 use sqlx::PgPool;
 use std::collections::HashMap;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crate::registry::Registry;
 
@@ -165,6 +165,7 @@ impl Scheduler {
         image: &str,
         internal_port: Option<u16>,
         host_port: u16,
+        labels: Option<HashMap<String, String>>,
     ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
         let (exposed_ports, host_config_body) = match internal_port {
             Some(cp) => {
@@ -188,6 +189,9 @@ impl Scheduler {
             None => (None, None),
         };
 
+        let mut networking_config: HashMap<String, EndpointSettings> = HashMap::new();
+        networking_config.insert("paas-net".to_string(), EndpointSettings::default());
+
         self.docker
             .create_container(
                 Some(
@@ -199,6 +203,10 @@ impl Scheduler {
                     image: Some(image.to_string()),
                     exposed_ports,
                     host_config: host_config_body,
+                    labels,
+                    networking_config: Some(bollard::models::NetworkingConfig {
+                        endpoints_config: Some(networking_config),
+                    }),
                     ..Default::default()
                 },
             )
@@ -337,8 +345,29 @@ impl Scheduler {
             }
         };
 
+        let version = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs()
+            .to_string();
+        let service_name = format!("{app_name}-{version}");
+        let mut labels = HashMap::new();
+        labels.insert("traefik.enable".to_string(), "true".to_string());
+        labels.insert(
+            format!("traefik.http.routers.{app_name}.rule"),
+            format!("Host(`{app_name}.localhost`)"),
+        );
+        labels.insert(
+            format!("traefik.http.routers.{app_name}.service"),
+            service_name.clone(),
+        );
+        labels.insert(
+            format!("traefik.http.services.{service_name}.loadbalancer.server.port"),
+            "8000".to_string(),
+        );
+
         let container_id = match self
-            .create_and_start(app_name, image, internal_port, host_port)
+            .create_and_start(app_name, image, internal_port, host_port, Some(labels))
             .await
         {
             Ok(id) => id,
@@ -389,7 +418,7 @@ impl Scheduler {
         self.pull(image).await;
 
         let container_id = match self
-            .create_and_start(app_name, image, internal_port, host_port)
+            .create_and_start(app_name, image, internal_port, host_port, None)
             .await
         {
             Ok(id) => id,
