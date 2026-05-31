@@ -40,7 +40,7 @@ services:
       PORT: "${PORT:-8080}"
       HOST: "0.0.0.0"
       DATABASE_URL: "postgresql://${POSTGRES_USER:-paastech}:${POSTGRES_PASSWORD:-paastech}@db:5432/${POSTGRES_DB:-paastech}"
-      BASE_DOMAIN: "${BASE_DOMAIN}"
+      BASE_DOMAIN: "${BASE_DOMAIN:-localhost}"
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
     depends_on:
