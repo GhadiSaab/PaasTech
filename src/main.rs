@@ -833,9 +833,23 @@ async fn stop_resource(
 #[delete("/resource/{id}")]
 async fn delete_resource(
     pool: web::Data<PgPool>,
+    scheduler: web::Data<Scheduler>,
     id: web::Path<String>,
 ) -> Result<impl Responder, Error> {
     let uuid = Uuid::parse_str(&id).map_err(|_| error::ErrorBadRequest("Invalid resource id"))?;
+
+    let service = sqlx::query!("SELECT status FROM services WHERE id = $1", uuid)
+        .fetch_optional(pool.get_ref())
+        .await
+        .map_err(error::ErrorInternalServerError)?
+        .ok_or_else(|| error::ErrorNotFound("Resource not found"))?;
+
+    if service.status == "running" {
+        scheduler
+            .stop_service(&uuid.to_string())
+            .await
+            .map_err(|e| error::ErrorInternalServerError(format!("Failed to stop service: {e}")))?;
+    }
 
     let result = sqlx::query!("DELETE FROM services WHERE id = $1", uuid)
         .execute(pool.get_ref())
