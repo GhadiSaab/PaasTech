@@ -23,7 +23,9 @@ use crate::docker::{
     fetch_service_versions, is_valid_service, prepare_config_for_service, service_port_for_service,
     valid_services, validate_docker_tag,
 };
-use crate::engine::{MultipartData, build_image, extract_zip, save_multipart_file};
+use crate::engine::{
+    MultipartData, build_image, extract_zip, read_procfile_command, save_multipart_file,
+};
 use crate::models::{CreateResourcePayload, Resource, UpdateResourcePayload};
 use crate::registry::Registry;
 use crate::scheduler::{Scheduler, find_free_port};
@@ -226,13 +228,16 @@ async fn upload_app(
         .await
         .map_err(error::ErrorInternalServerError)?;
 
-    let image_name = match build_image(extracted_folder).await {
+    let image_name = match build_image(extracted_folder.clone()).await {
         Ok(name) => name,
         Err(e) => return Ok(HttpResponse::BadRequest().json(json!({"error": e}))),
     };
 
+    let cmd = read_procfile_command(&extracted_folder)
+        .map(|c| c.split_whitespace().map(String::from).collect());
+
     scheduler
-        .deploy(pool.get_ref(), &name, &image_name, internal_port)
+        .deploy(pool.get_ref(), &name, &image_name, internal_port, cmd)
         .await;
 
     Ok(HttpResponse::Ok().json(json!({"status": "success", "image": image_name})))
@@ -282,7 +287,7 @@ async fn deploy_app(
     body: web::Json<DeployBody>,
 ) -> impl Responder {
     scheduler
-        .deploy(&pool, &body.name, &body.image, body.port)
+        .deploy(&pool, &body.name, &body.image, body.port, None)
         .await;
     HttpResponse::Ok().finish()
 }
