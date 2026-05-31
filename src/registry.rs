@@ -22,6 +22,7 @@ pub struct App {
 pub struct Registry;
 
 impl Registry {
+    #[allow(clippy::too_many_arguments)]
     pub async fn save(
         pool: &PgPool,
         name: &str,
@@ -105,6 +106,7 @@ impl Registry {
         Ok(())
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub async fn upsert(
         pool: &PgPool,
         name: &str,
