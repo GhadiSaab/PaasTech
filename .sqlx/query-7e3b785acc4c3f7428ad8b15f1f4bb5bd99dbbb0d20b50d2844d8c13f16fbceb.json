@@ -1,0 +1,16 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE services\n        SET\n            display_name = COALESCE($1, display_name),\n            version = COALESCE($2, version)\n        WHERE id = $3",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Varchar",
+        "Varchar",
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "7e3b785acc4c3f7428ad8b15f1f4bb5bd99dbbb0d20b50d2844d8c13f16fbceb"
+}

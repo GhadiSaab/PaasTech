@@ -1,9 +1,18 @@
-rustdoc:
+pages:
   extends: .rust-base
-  stage: documentation
+  stage: publish
+  needs:
+    - job: test
+    - job: audit
+  rules:
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
   script:
     - cargo doc --no-deps
+    - mv target/doc public
   artifacts:
     paths:
-      - target/doc
+      - public
     expire_in: 1 week
+  environment:
+    name: documentation
+    url: $CI_PAGES_URL

@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "\n            SELECT id, name, image_id, container_id, port, status, env, created_at\n            FROM applications\n            ORDER BY created_at ASC\n            ",
+  "query": "\n            SELECT id, name, image_id, container_id, internal_port, port, status, created_at\n            FROM applications\n            WHERE name = $1\n            ",
   "describe": {
     "columns": [
       {
@@ -25,18 +25,18 @@
       },
       {
         "ordinal": 4,
-        "name": "port",
+        "name": "internal_port",
         "type_info": "Int4"
       },
       {
         "ordinal": 5,
-        "name": "status",
-        "type_info": "Varchar"
+        "name": "port",
+        "type_info": "Int4"
       },
       {
         "ordinal": 6,
-        "name": "env",
-        "type_info": "Jsonb"
+        "name": "status",
+        "type_info": "Varchar"
       },
       {
         "ordinal": 7,
@@ -45,7 +45,9 @@
       }
     ],
     "parameters": {
-      "Left": []
+      "Left": [
+        "Text"
+      ]
     },
     "nullable": [
       false,
@@ -53,10 +55,10 @@
       true,
       true,
       true,
-      false,
       true,
+      false,
       false
     ]
   },
-  "hash": "a60c3881d0f6214ef92b77468acc653422ce47344d621c5fef522507a9104424"
+  "hash": "7439c6d0feec566c87b8bd597a8286cff173acc7e58b6a5d0d3a8fe3245a80e8"
 }

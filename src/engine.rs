@@ -1,36 +1,49 @@
 use actix_multipart::Multipart;
 use actix_web::{Error, web};
 use futures_util::TryStreamExt;
+use std::collections::HashMap;
 use std::path::PathBuf;
 use tokio::fs::File;
 use tokio::io::AsyncWriteExt;
 use tokio::process::Command as TokioCommand;
 use uuid::Uuid;
 
-pub async fn save_multipart_file(mut payload: Multipart) -> Result<Option<PathBuf>, Error> {
+pub struct MultipartData {
+    pub file_path: Option<PathBuf>,
+    pub fields: HashMap<String, String>,
+}
+
+pub async fn save_multipart_file(mut payload: Multipart) -> Result<MultipartData, Error> {
+    let mut file_path = None;
+    let mut fields = HashMap::new();
+
     while let Ok(Some(mut field)) = payload.try_next().await {
-        let filename = match field.content_disposition() {
-            Some(content) => match content.get_filename() {
-                Some(name) => name.to_string(),
-                None => continue,
-            },
+        let content_disposition = match field.content_disposition() {
+            Some(cd) => cd,
             None => continue,
         };
 
-        // TODO: check if it's a real zip file
+        let field_name = content_disposition.get_name().unwrap_or("").to_string();
 
-        let filepath = PathBuf::from(format!("/tmp/uploads/{}", filename));
-
-        let mut file = File::create(&filepath).await?;
-
-        while let Ok(Some(chunk)) = field.try_next().await {
-            file.write_all(&chunk).await?;
+        if let Some(filename) = content_disposition.get_filename() {
+            let filename = filename.to_string();
+            let filepath = PathBuf::from(format!("/tmp/uploads/{}", filename));
+            let mut file = File::create(&filepath).await?;
+            while let Ok(Some(chunk)) = field.try_next().await {
+                file.write_all(&chunk).await?;
+            }
+            file.flush().await?;
+            file_path = Some(filepath);
+        } else {
+            let mut value = String::new();
+            while let Ok(Some(chunk)) = field.try_next().await {
+                value.push_str(&String::from_utf8_lossy(&chunk));
+            }
+            fields.insert(field_name, value);
         }
-        file.flush().await?;
-
-        return Ok(Some(filepath));
     }
-    Ok(None)
+
+    Ok(MultipartData { file_path, fields })
 }
 
 pub async fn extract_zip(source: PathBuf) -> Result<PathBuf, String> {
