@@ -63,6 +63,7 @@ async fn init() -> Config {
         upload_app,
         list_apps,
         deploy_app,
+        update_app,
         stop_app,
         restart_app,
         status_app,
@@ -124,6 +125,7 @@ async fn main() -> std::io::Result<()> {
             .service(upload_app)
             .service(list_apps)
             .service(deploy_app)
+            .service(update_app)
             .service(stop_app)
             .service(restart_app)
             .service(status_app)
@@ -317,6 +319,48 @@ async fn deploy_app(
         Err(DeployError::Other(message)) => {
             eprintln!("deploy: failed to deploy {}: {message}", body.name);
             HttpResponse::InternalServerError().body(message)
+        }
+    }
+}
+
+#[derive(Deserialize, utoipa::ToSchema)]
+struct UpdateBody {
+    image: String,
+    port: Option<u16>,
+}
+
+#[utoipa::path(
+    post,
+    path = "/app/{app_name}/update",
+    params(("app_name" = String, Path, description = "Application name")),
+    request_body = UpdateBody,
+    responses(
+        (status = 200, description = "Rolling update completed"),
+        (status = 404, description = "Application not found"),
+        (status = 500, description = "Rolling update failed"),
+    ),
+    tag = "apps"
+)]
+#[post("/app/{app_name}/update")]
+async fn update_app(
+    scheduler: web::Data<Scheduler>,
+    pool: web::Data<PgPool>,
+    path: web::Path<String>,
+    body: web::Json<UpdateBody>,
+) -> impl Responder {
+    let app_name = path.into_inner();
+    match scheduler
+        .rolling_update(&pool, &app_name, &body.image, body.port, vec![])
+        .await
+    {
+        Ok(()) => HttpResponse::Ok().finish(),
+        Err(e) => {
+            let msg = e.to_string();
+            if msg.contains("app not found") {
+                HttpResponse::NotFound().body(msg)
+            } else {
+                HttpResponse::InternalServerError().body(msg)
+            }
         }
     }
 }
