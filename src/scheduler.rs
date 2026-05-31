@@ -35,12 +35,13 @@ pub struct ContainerInfo {
 #[allow(dead_code)]
 impl Scheduler {
     pub fn new() -> Self {
-        let docker =
-            Docker::connect_with_unix("/run/user/1000/docker.sock", 120, API_DEFAULT_VERSION)
-                .unwrap_or_else(|_| {
-                    Docker::connect_with_defaults()
-                        .expect("Impossible de se connecter au Docker Engine")
-                });
+        let docker_host = std::env::var("DOCKER_HOST").unwrap_or_default();
+        let docker = if docker_host.is_empty() {
+            Docker::connect_with_defaults().expect("Failed to connect to Docker Engine")
+        } else {
+            Docker::connect_with_unix(&docker_host, 120, API_DEFAULT_VERSION)
+                .expect("Failed to connect to Docker Engine")
+        };
         Self { docker }
     }
 
