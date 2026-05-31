@@ -5,8 +5,8 @@ use bollard::models::{
 };
 use bollard::query_parameters::{
     CreateContainerOptionsBuilder, CreateImageOptionsBuilder, ListContainersOptionsBuilder,
-    LogsOptionsBuilder, RemoveContainerOptionsBuilder, RestartContainerOptionsBuilder,
-    StartContainerOptionsBuilder, StopContainerOptionsBuilder,
+    LogsOptionsBuilder, RemoveContainerOptionsBuilder, RenameContainerOptionsBuilder,
+    RestartContainerOptionsBuilder, StartContainerOptionsBuilder, StopContainerOptionsBuilder,
 };
 use futures_util::StreamExt;
 use futures_util::TryStreamExt;
@@ -702,13 +702,179 @@ impl Scheduler {
             return Err("health probe timed out after 15s; old container left running".into());
         }
 
+        // Release the app name without stopping the old container. Its Traefik labels
+        // remain active while the replacement starts under the production name.
+        let old_name = format!("{name}-old-{version}");
+        let final_port = match find_free_port() {
+            Ok(port) => port,
+            Err(e) => {
+                let _ = self
+                    .docker
+                    .stop_container(
+                        &canary_name,
+                        Some(StopContainerOptionsBuilder::default().build()),
+                    )
+                    .await;
+                let _ = self
+                    .docker
+                    .remove_container(
+                        &canary_name,
+                        Some(RemoveContainerOptionsBuilder::default().build()),
+                    )
+                    .await;
+                return Err(e.into());
+            }
+        };
+        let mut labels = build_traefik_labels(name, internal_port, &version, &domain);
+        let router_name = format!("{name}-{version}");
+        labels.remove(&format!("traefik.http.routers.{name}.rule"));
+        labels.remove(&format!("traefik.http.routers.{name}.service"));
+        labels.insert(
+            format!("traefik.http.routers.{router_name}.rule"),
+            format!("Host(`{name}.{domain}`)"),
+        );
+        labels.insert(
+            format!("traefik.http.routers.{router_name}.service"),
+            format!("{name}-{version}"),
+        );
+        labels.insert(
+            format!("traefik.http.routers.{router_name}.priority"),
+            version.clone(),
+        );
+        if let Err(e) = self
+            .docker
+            .rename_container(
+                name,
+                RenameContainerOptionsBuilder::default()
+                    .name(&old_name)
+                    .build(),
+            )
+            .await
+        {
+            let _ = self
+                .docker
+                .stop_container(
+                    &canary_name,
+                    Some(StopContainerOptionsBuilder::default().build()),
+                )
+                .await;
+            let _ = self
+                .docker
+                .remove_container(
+                    &canary_name,
+                    Some(RemoveContainerOptionsBuilder::default().build()),
+                )
+                .await;
+            return Err(e.into());
+        }
+
+        let final_id = match self
+            .create_and_start(name, &image, internal_port, final_port, labels)
+            .await
+        {
+            Ok(id) => id,
+            Err(e) => {
+                let _ = self
+                    .docker
+                    .remove_container(
+                        name,
+                        Some(RemoveContainerOptionsBuilder::default().force(true).build()),
+                    )
+                    .await;
+                let _ = self
+                    .docker
+                    .rename_container(
+                        &old_name,
+                        RenameContainerOptionsBuilder::default().name(name).build(),
+                    )
+                    .await;
+                let _ = self
+                    .docker
+                    .stop_container(
+                        &canary_name,
+                        Some(StopContainerOptionsBuilder::default().build()),
+                    )
+                    .await;
+                let _ = self
+                    .docker
+                    .remove_container(
+                        &canary_name,
+                        Some(RemoveContainerOptionsBuilder::default().build()),
+                    )
+                    .await;
+                return Err(e);
+            }
+        };
+
+        let health_url = format!("http://localhost:{final_port}/health");
+        let deadline = std::time::Instant::now() + Duration::from_secs(15);
+        let mut healthy = false;
+
+        while std::time::Instant::now() < deadline {
+            match client.get(&health_url).send().await {
+                Ok(resp) => {
+                    let status = resp.status().as_u16();
+                    if (200..500).contains(&status) {
+                        healthy = true;
+                        break;
+                    }
+                }
+                Err(_) => {}
+            }
+            sleep(Duration::from_millis(500)).await;
+        }
+
+        if !healthy {
+            let _ = self
+                .docker
+                .remove_container(
+                    name,
+                    Some(RemoveContainerOptionsBuilder::default().force(true).build()),
+                )
+                .await;
+            let _ = self
+                .docker
+                .rename_container(
+                    &old_name,
+                    RenameContainerOptionsBuilder::default().name(name).build(),
+                )
+                .await;
+            let _ = self
+                .docker
+                .stop_container(
+                    &canary_name,
+                    Some(StopContainerOptionsBuilder::default().build()),
+                )
+                .await;
+            let _ = self
+                .docker
+                .remove_container(
+                    &canary_name,
+                    Some(RemoveContainerOptionsBuilder::default().build()),
+                )
+                .await;
+            return Err(
+                "production health probe timed out after 15s; old container left running".into(),
+            );
+        }
+
+        // Traefik batches Docker provider updates. Keep the old backend alive until
+        // the replacement has had time to enter Traefik's dynamic configuration.
+        sleep(Duration::from_secs(3)).await;
+
         let _ = self
             .docker
-            .stop_container(name, Some(StopContainerOptionsBuilder::default().build()))
+            .stop_container(
+                &old_name,
+                Some(StopContainerOptionsBuilder::default().build()),
+            )
             .await;
         let _ = self
             .docker
-            .remove_container(name, Some(RemoveContainerOptionsBuilder::default().build()))
+            .remove_container(
+                &old_name,
+                Some(RemoveContainerOptionsBuilder::default().build()),
+            )
             .await;
 
         // Tear down the canary — it was only used for health probing.
@@ -726,12 +892,6 @@ impl Scheduler {
                 Some(RemoveContainerOptionsBuilder::default().build()),
             )
             .await;
-
-        let final_port = find_free_port()?;
-        let labels = traefik_labels(name, internal_port, &domain);
-        let final_id = self
-            .create_and_start(name, &image, internal_port, final_port, labels)
-            .await?;
 
         Registry::upsert(
             pool,
