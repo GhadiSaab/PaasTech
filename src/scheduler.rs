@@ -72,12 +72,11 @@ fn image_with_default_tag(image: &str) -> String {
     }
 }
 
-fn traefik_labels(app_name: &str, internal_port: u16) -> HashMap<String, String> {
-    let version = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs()
-        .to_string();
+fn build_traefik_labels(
+    app_name: &str,
+    internal_port: u16,
+    version: &str,
+) -> HashMap<String, String> {
     let service_name = format!("{app_name}-{version}");
     let base_domain = std::env::var("BASE_DOMAIN").unwrap_or_else(|_| "localhost".to_string());
 
@@ -96,6 +95,15 @@ fn traefik_labels(app_name: &str, internal_port: u16) -> HashMap<String, String>
         internal_port.to_string(),
     );
     labels
+}
+
+fn traefik_labels(app_name: &str, internal_port: u16) -> HashMap<String, String> {
+    let version = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+        .to_string();
+    build_traefik_labels(app_name, internal_port, &version)
 }
 
 #[derive(Clone)]
@@ -575,6 +583,155 @@ impl Scheduler {
             .map_err(|e| {
                 DeployError::Other(format!("Failed to update status for {app_name}: {e}"))
             })?;
+
+        Ok(())
+    }
+
+    pub async fn rolling_update(
+        &self,
+        pool: &PgPool,
+        name: &str,
+        new_image: &str,
+        internal_port: Option<u16>,
+        env: Vec<String>,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let existing = Registry::get(pool, name).await?.ok_or("app not found")?;
+        let old_container_id = existing.container_id.clone().unwrap_or_default();
+        let image = self.pull(new_image).await?;
+        let internal_port = self.resolve_internal_port(&image, internal_port).await?;
+
+        let version = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs()
+            .to_string();
+        let canary_name = format!("{name}-canary-{version}");
+        let host_port = find_free_port()?;
+        let labels = build_traefik_labels(name, internal_port, &version);
+        let port_key = format!("{}/tcp", internal_port);
+        let mut port_bindings: HashMap<String, Option<Vec<PortBinding>>> = HashMap::new();
+        port_bindings.insert(
+            port_key.clone(),
+            Some(vec![PortBinding {
+                host_ip: Some("0.0.0.0".to_string()),
+                host_port: Some(host_port.to_string()),
+            }]),
+        );
+
+        self.ensure_paas_net().await;
+        self.docker
+            .create_container(
+                Some(
+                    CreateContainerOptionsBuilder::default()
+                        .name(&canary_name)
+                        .build(),
+                ),
+                ContainerCreateBody {
+                    image: Some(image.clone()),
+                    env: if env.is_empty() { None } else { Some(env) },
+                    exposed_ports: Some(vec![port_key]),
+                    host_config: Some(HostConfig {
+                        port_bindings: Some(port_bindings),
+                        ..Default::default()
+                    }),
+                    labels: Some(labels),
+                    networking_config: Some(bollard::models::NetworkingConfig {
+                        endpoints_config: Some(paas_net()),
+                    }),
+                    ..Default::default()
+                },
+            )
+            .await?;
+
+        self.docker
+            .start_container(
+                &canary_name,
+                Some(StartContainerOptionsBuilder::default().build()),
+            )
+            .await?;
+
+        let new_container_id = self
+            .docker
+            .inspect_container(&canary_name, None)
+            .await
+            .ok()
+            .and_then(|info| info.id)
+            .unwrap_or_default();
+
+        let container_ip = self
+            .docker
+            .inspect_container(&canary_name, None)
+            .await
+            .ok()
+            .and_then(|info| info.network_settings)
+            .and_then(|ns| ns.networks)
+            .and_then(|nets| nets.get("paas-net").cloned())
+            .and_then(|ep| ep.ip_address)
+            .ok_or("failed to get container IP on paas-net")?;
+
+        let health_url = format!("http://{container_ip}:{internal_port}/health");
+        let client = reqwest::Client::builder()
+            .timeout(Duration::from_millis(500))
+            .build()?;
+
+        let deadline = std::time::Instant::now() + Duration::from_secs(15);
+        let mut healthy = false;
+        while std::time::Instant::now() < deadline {
+            if let Ok(resp) = client.get(&health_url).send().await {
+                let status = resp.status().as_u16();
+                if (200..500).contains(&status) {
+                    healthy = true;
+                    break;
+                }
+            }
+            sleep(Duration::from_millis(500)).await;
+        }
+
+        if !healthy {
+            let _ = self
+                .docker
+                .stop_container(
+                    &canary_name,
+                    Some(StopContainerOptionsBuilder::default().build()),
+                )
+                .await;
+            let _ = self
+                .docker
+                .remove_container(
+                    &canary_name,
+                    Some(RemoveContainerOptionsBuilder::default().build()),
+                )
+                .await;
+            return Err("health probe timed out after 15s; old container left running".into());
+        }
+
+        if !old_container_id.is_empty() {
+            let _ = self
+                .docker
+                .stop_container(
+                    &old_container_id,
+                    Some(StopContainerOptionsBuilder::default().build()),
+                )
+                .await;
+            let _ = self
+                .docker
+                .remove_container(
+                    &old_container_id,
+                    Some(RemoveContainerOptionsBuilder::default().build()),
+                )
+                .await;
+        }
+
+        Registry::upsert(
+            pool,
+            name,
+            &image,
+            &new_container_id,
+            Some(internal_port as i32),
+            host_port as i32,
+            "running",
+        )
+        .await?;
 
         Ok(())
     }

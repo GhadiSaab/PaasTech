@@ -1,0 +1,70 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            INSERT INTO applications (id, name, image_id, container_id, internal_port, port, status, created_at)\n            VALUES ($1, $2, $3, $4, $5, $6, $7, NOW())\n            ON CONFLICT (name) DO UPDATE SET\n                image_id = EXCLUDED.image_id,\n                container_id = EXCLUDED.container_id,\n                internal_port = EXCLUDED.internal_port,\n                port = EXCLUDED.port,\n                status = EXCLUDED.status\n            RETURNING id, name, image_id, container_id, internal_port, port, status, created_at\n            ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "name",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 2,
+        "name": "image_id",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 3,
+        "name": "container_id",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 4,
+        "name": "internal_port",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 5,
+        "name": "port",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 6,
+        "name": "status",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 7,
+        "name": "created_at",
+        "type_info": "Timestamp"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Varchar",
+        "Varchar",
+        "Varchar",
+        "Int4",
+        "Int4",
+        "Varchar"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      true,
+      true,
+      true,
+      true,
+      false,
+      false
+    ]
+  },
+  "hash": "065d9c563934899484c00a3a17bfde4e87b5134b2c4bd38ddd7e978605c9eb4f"
+}

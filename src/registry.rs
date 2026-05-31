@@ -102,6 +102,42 @@ impl Registry {
         Ok(())
     }
 
+    pub async fn upsert(
+        pool: &PgPool,
+        name: &str,
+        image_id: &str,
+        container_id: &str,
+        internal_port: Option<i32>,
+        port: i32,
+        status: &str,
+    ) -> Result<App, sqlx::Error> {
+        let app = sqlx::query_as!(
+            App,
+            r#"
+            INSERT INTO applications (id, name, image_id, container_id, internal_port, port, status, created_at)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, NOW())
+            ON CONFLICT (name) DO UPDATE SET
+                image_id = EXCLUDED.image_id,
+                container_id = EXCLUDED.container_id,
+                internal_port = EXCLUDED.internal_port,
+                port = EXCLUDED.port,
+                status = EXCLUDED.status
+            RETURNING id, name, image_id, container_id, internal_port, port, status, created_at
+            "#,
+            Uuid::new_v4(),
+            name,
+            image_id,
+            container_id,
+            internal_port,
+            port,
+            status,
+        )
+        .fetch_one(pool)
+        .await?;
+
+        Ok(app)
+    }
+
     pub async fn update_container_id(
         pool: &PgPool,
         name: &str,
