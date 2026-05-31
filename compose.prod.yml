@@ -17,6 +17,20 @@ services:
       timeout: 5s
       retries: 5
 
+  traefik:
+    image: traefik:v3.6.1
+    restart: unless-stopped
+    command:
+      - "--providers.docker=true"
+      - "--providers.docker.exposedbydefault=false"
+      - "--entrypoints.web.address=:80"
+    ports:
+      - "80:80"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    networks:
+      - paas-net
+
   api:
     build: .
     restart: unless-stopped
@@ -26,6 +40,7 @@ services:
       PORT: "${PORT:-8080}"
       HOST: "0.0.0.0"
       DATABASE_URL: "postgresql://${POSTGRES_USER:-paastech}:${POSTGRES_PASSWORD:-paastech}@db:5432/${POSTGRES_DB:-paastech}"
+      BASE_DOMAIN: "${BASE_DOMAIN}"
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
     depends_on:
@@ -33,10 +48,13 @@ services:
         condition: service_healthy
     networks:
       - internal
+      - paas-net
 
 networks:
   internal:
     driver: bridge
+  paas-net:
+    name: paas-net
 
 volumes:
   postgres_data:
