@@ -398,7 +398,13 @@ async fn test_delete_resource() {
     let pool = build_pool().await;
     let id = insert_test_resource(pool.get_ref(), "To Delete", "postgres", "15").await;
 
-    let app = test::init_service(App::new().app_data(pool).service(delete_resource)).await;
+    let app = test::init_service(
+        App::new()
+            .app_data(pool)
+            .app_data(build_scheduler())
+            .service(delete_resource),
+    )
+    .await;
 
     let req = test::TestRequest::delete()
         .uri(&format!("/resource/{}", id))
@@ -408,10 +414,55 @@ async fn test_delete_resource() {
 }
 
 #[actix_web::test]
+async fn test_delete_running_resource_removes_container() {
+    let pool = build_pool().await;
+    let scheduler = build_scheduler();
+    let id = Uuid::new_v4();
+
+    let (container_id, host_port) = scheduler
+        .start_service(&id.to_string(), "redis:7", 6379, None, vec![], vec![])
+        .await
+        .unwrap();
+
+    sqlx::query(
+        "INSERT INTO services (id, display_name, name, version, container_id, port, status) VALUES ($1, 'Running Redis', 'redis', '7', $2, $3, 'running')",
+    )
+    .bind(id)
+    .bind(container_id)
+    .bind(host_port as i32)
+    .execute(pool.get_ref())
+    .await
+    .unwrap();
+
+    let app = test::init_service(
+        App::new()
+            .app_data(pool.clone())
+            .app_data(scheduler.clone())
+            .service(delete_resource),
+    )
+    .await;
+
+    let req = test::TestRequest::delete()
+        .uri(&format!("/resource/{}", id))
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status(), 204);
+    assert_eq!(scheduler.inspect(&id.to_string()).await, "unknown");
+
+    cleanup_resource(pool.get_ref(), id).await;
+}
+
+#[actix_web::test]
 async fn test_delete_resource_not_found() {
     let pool = build_pool().await;
 
-    let app = test::init_service(App::new().app_data(pool).service(delete_resource)).await;
+    let app = test::init_service(
+        App::new()
+            .app_data(pool)
+            .app_data(build_scheduler())
+            .service(delete_resource),
+    )
+    .await;
 
     let req = test::TestRequest::delete()
         .uri(&format!("/resource/{}", Uuid::new_v4()))
