@@ -1,6 +1,8 @@
 use actix_web::rt::time::sleep;
 use bollard::Docker;
-use bollard::models::{ContainerCreateBody, EndpointSettings, HostConfig, PortBinding};
+use bollard::models::{
+    ContainerCreateBody, EndpointSettings, HostConfig, NetworkCreateRequest, PortBinding,
+};
 use bollard::query_parameters::{
     CreateContainerOptionsBuilder, CreateImageOptionsBuilder, ListContainersOptionsBuilder,
     RemoveContainerOptionsBuilder, RestartContainerOptionsBuilder, StartContainerOptionsBuilder,
@@ -192,6 +194,19 @@ impl Scheduler {
         while stream.next().await.is_some() {}
     }
 
+    async fn ensure_paas_net(&self) {
+        if self.docker.inspect_network("paas-net", None).await.is_ok() {
+            return;
+        }
+        let _ = self
+            .docker
+            .create_network(NetworkCreateRequest {
+                name: "paas-net".to_string(),
+                ..Default::default()
+            })
+            .await;
+    }
+
     async fn create_and_start(
         &self,
         app_name: &str,
@@ -200,6 +215,7 @@ impl Scheduler {
         host_port: u16,
         labels: HashMap<String, String>,
     ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+        self.ensure_paas_net().await;
         let (exposed_ports, host_config_body) = match internal_port {
             Some(cp) => {
                 let port_key = format!("{}/tcp", cp);
@@ -269,6 +285,7 @@ impl Scheduler {
         env_vars: Vec<String>,
         binds: Vec<String>,
     ) -> Result<(String, u16), Box<dyn std::error::Error + Send + Sync>> {
+        self.ensure_paas_net().await;
         self.docker
             .create_image(
                 Some(
