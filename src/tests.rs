@@ -129,7 +129,7 @@ async fn test_stop_app() {
     let app_name = "test-stop-app";
 
     cleanup_app(pool.get_ref(), app_name).await;
-    Registry::save(pool.get_ref(), app_name, "", "", None, 9001, "running")
+    Registry::save(pool.get_ref(), app_name, "", "", None, 9001, "running", None)
         .await
         .unwrap();
 
@@ -178,7 +178,7 @@ async fn test_restart_app() {
 
     cleanup_app(pool.get_ref(), app_name).await;
     // image_id vide → redeploy prend le chemin "pas de Docker"
-    Registry::save(pool.get_ref(), app_name, "", "", None, 9002, "running")
+    Registry::save(pool.get_ref(), app_name, "", "", None, 9002, "running", None)
         .await
         .unwrap();
 
@@ -226,7 +226,7 @@ async fn test_status_app() {
     let app_name = "test-status-app";
 
     cleanup_app(pool.get_ref(), app_name).await;
-    Registry::save(pool.get_ref(), app_name, "", "", None, 9003, "running")
+    Registry::save(pool.get_ref(), app_name, "", "", None, 9003, "running", None)
         .await
         .unwrap();
 
