@@ -8,6 +8,7 @@ CREATE TABLE IF NOT EXISTS applications (
     internal_port INTEGER NULL,
     port INTEGER NULL,
     status VARCHAR(20) NOT NULL DEFAULT 'stopped',
+    base_domain VARCHAR(255) NULL,
     created_at TIMESTAMP NOT NULL DEFAULT now()
 );
 

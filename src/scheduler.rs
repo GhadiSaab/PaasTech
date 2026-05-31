@@ -76,9 +76,9 @@ fn build_traefik_labels(
     app_name: &str,
     internal_port: u16,
     version: &str,
+    base_domain: &str,
 ) -> HashMap<String, String> {
     let service_name = format!("{app_name}-{version}");
-    let base_domain = std::env::var("BASE_DOMAIN").unwrap_or_else(|_| "localhost".to_string());
 
     let mut labels = HashMap::new();
     labels.insert("traefik.enable".to_string(), "true".to_string());
@@ -97,13 +97,24 @@ fn build_traefik_labels(
     labels
 }
 
-fn traefik_labels(app_name: &str, internal_port: u16) -> HashMap<String, String> {
+fn traefik_labels(
+    app_name: &str,
+    internal_port: u16,
+    base_domain: &str,
+) -> HashMap<String, String> {
     let version = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs()
         .to_string();
-    build_traefik_labels(app_name, internal_port, &version)
+    build_traefik_labels(app_name, internal_port, &version, base_domain)
+}
+
+fn resolve_domain(base_domain: Option<&str>) -> String {
+    base_domain
+        .map(|s| s.to_string())
+        .or_else(|| std::env::var("BASE_DOMAIN").ok())
+        .unwrap_or_else(|| "localhost".to_string())
 }
 
 #[derive(Clone)]
@@ -512,6 +523,7 @@ impl Scheduler {
         app_name: &str,
         image: &str,
         internal_port: u16,
+        base_domain: Option<&str>,
     ) -> Result<(), DeployError> {
         let image = self.pull(image).await?;
 
@@ -519,7 +531,8 @@ impl Scheduler {
             DeployError::Other(format!("Failed to find free port for {app_name}: {e}"))
         })?;
 
-        let labels = traefik_labels(app_name, internal_port);
+        let domain = resolve_domain(base_domain);
+        let labels = traefik_labels(app_name, internal_port, &domain);
 
         let container_id = self
             .create_and_start(app_name, &image, internal_port, host_port, labels)
@@ -534,6 +547,7 @@ impl Scheduler {
             Some(internal_port as i32),
             host_port as i32,
             "running",
+            base_domain,
         )
         .await
         .map_err(|e| DeployError::Other(format!("Failed to save app {app_name}: {e}")))?;
@@ -548,6 +562,7 @@ impl Scheduler {
         image: &str,
         internal_port: u16,
         host_port: u16,
+        base_domain: Option<&str>,
     ) -> Result<(), DeployError> {
         let image = self.pull(image).await?;
 
@@ -567,7 +582,8 @@ impl Scheduler {
             )
             .await;
 
-        let labels = traefik_labels(app_name, internal_port);
+        let domain = resolve_domain(base_domain);
+        let labels = traefik_labels(app_name, internal_port, &domain);
 
         let container_id = self
             .create_and_start(app_name, &image, internal_port, host_port, labels)
@@ -594,8 +610,10 @@ impl Scheduler {
         new_image: &str,
         internal_port: Option<u16>,
         env: Vec<String>,
+        base_domain: Option<&str>,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        let _existing = Registry::get(pool, name).await?.ok_or("app not found")?;
+        let existing = Registry::get(pool, name).await?.ok_or("app not found")?;
+        let domain = resolve_domain(base_domain.or(existing.base_domain.as_deref()));
         let image = self.pull(new_image).await?;
         let internal_port = self.resolve_internal_port(&image, internal_port).await?;
 
@@ -710,7 +728,7 @@ impl Scheduler {
             .await;
 
         let final_port = find_free_port()?;
-        let labels = traefik_labels(name, internal_port);
+        let labels = traefik_labels(name, internal_port, &domain);
         let final_id = self
             .create_and_start(name, &image, internal_port, final_port, labels)
             .await?;
@@ -723,6 +741,7 @@ impl Scheduler {
             Some(internal_port as i32),
             final_port as i32,
             "running",
+            Some(&domain),
         )
         .await?;
 

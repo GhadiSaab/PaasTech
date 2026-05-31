@@ -249,7 +249,7 @@ async fn upload_app(
     };
 
     match scheduler
-        .deploy(pool.get_ref(), &name, &image_name, internal_port)
+        .deploy(pool.get_ref(), &name, &image_name, internal_port, None)
         .await
     {
         Ok(()) => Ok(HttpResponse::Ok().json(json!({"status": "success", "name": name}))),
@@ -282,6 +282,7 @@ struct DeployBody {
     name: String,
     image: String,
     port: Option<u16>,
+    base_domain: Option<String>,
 }
 
 #[utoipa::path(
@@ -309,7 +310,7 @@ async fn deploy_app(
         }
     };
     match scheduler
-        .deploy(&pool, &body.name, &body.image, internal_port)
+        .deploy(&pool, &body.name, &body.image, internal_port, body.base_domain.as_deref())
         .await
     {
         Ok(()) => HttpResponse::Ok().finish(),
@@ -327,6 +328,7 @@ async fn deploy_app(
 struct UpdateBody {
     image: String,
     port: Option<u16>,
+    base_domain: Option<String>,
 }
 
 #[utoipa::path(
@@ -350,7 +352,14 @@ async fn update_app(
 ) -> impl Responder {
     let app_name = path.into_inner();
     match scheduler
-        .rolling_update(&pool, &app_name, &body.image, body.port, vec![])
+        .rolling_update(
+            &pool,
+            &app_name,
+            &body.image,
+            body.port,
+            vec![],
+            body.base_domain.as_deref(),
+        )
         .await
     {
         Ok(()) => HttpResponse::Ok().finish(),
@@ -453,7 +462,14 @@ async fn restart_app(
     };
 
     if let Err(e) = scheduler
-        .redeploy(&pool, &app_name, &image, internal_port, host_port)
+        .redeploy(
+            &pool,
+            &app_name,
+            &image,
+            internal_port,
+            host_port,
+            app.base_domain.as_deref(),
+        )
         .await
     {
         eprintln!("docker: failed to restart {app_name}: {e}");
