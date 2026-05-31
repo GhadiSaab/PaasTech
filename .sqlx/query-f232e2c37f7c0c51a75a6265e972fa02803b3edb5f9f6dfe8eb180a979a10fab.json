@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "\n            INSERT INTO applications (id, name, image_id, container_id, internal_port, port, status, created_at)\n            VALUES ($1, $2, $3, $4, $5, $6, $7, NOW())\n            RETURNING id, name, image_id, container_id, internal_port, port, status, created_at\n            ",
+  "query": "\n            SELECT id, name, image_id, container_id, internal_port, port, status, base_domain, created_at\n            FROM applications\n            WHERE name = $1\n            ",
   "describe": {
     "columns": [
       {
@@ -40,19 +40,18 @@
       },
       {
         "ordinal": 7,
+        "name": "base_domain",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 8,
         "name": "created_at",
         "type_info": "Timestamp"
       }
     ],
     "parameters": {
       "Left": [
-        "Uuid",
-        "Varchar",
-        "Varchar",
-        "Varchar",
-        "Int4",
-        "Int4",
-        "Varchar"
+        "Text"
       ]
     },
     "nullable": [
@@ -63,8 +62,9 @@
       true,
       true,
       false,
+      true,
       false
     ]
   },
-  "hash": "5b5d380612f12ccfcd575cf15106509226f78822564803de63db5b139957f95a"
+  "hash": "f232e2c37f7c0c51a75a6265e972fa02803b3edb5f9f6dfe8eb180a979a10fab"
 }
