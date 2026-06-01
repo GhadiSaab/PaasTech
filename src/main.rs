@@ -18,7 +18,7 @@ use docker::{
 use models::{CreateResourcePayload, Resource, UpdateResourcePayload};
 use registry::Registry;
 use reqwest::Client;
-use scheduler::Scheduler;
+use scheduler::{DeployError, Scheduler};
 use serde::Deserialize;
 use sqlx::PgPool;
 use std::collections::HashMap;
@@ -276,6 +276,7 @@ struct DeployBody {
     request_body = DeployBody,
     responses(
         (status = 200, description = "Application deployed"),
+        (status = 422, description = "Internal application port is required"),
         (status = 500, description = "Internal server error"),
     ),
     tag = "apps"
@@ -285,11 +286,20 @@ async fn deploy_app(
     scheduler: web::Data<Scheduler>,
     pool: web::Data<PgPool>,
     body: web::Json<DeployBody>,
-) -> impl Responder {
-    scheduler
+) -> HttpResponse {
+    match scheduler
         .deploy(&pool, &body.name, &body.image, body.port)
-        .await;
-    HttpResponse::Ok().finish()
+        .await
+    {
+        Ok(()) => HttpResponse::Ok().finish(),
+        Err(DeployError::PortRequired(message)) => {
+            HttpResponse::UnprocessableEntity().body(message)
+        }
+        Err(DeployError::Other(message)) => {
+            eprintln!("deploy: failed to deploy {}: {message}", body.name);
+            HttpResponse::InternalServerError().body(message)
+        }
+    }
 }
 
 #[utoipa::path(
@@ -374,9 +384,13 @@ async fn restart_app(
         },
     };
 
-    scheduler
+    if let Err(e) = scheduler
         .redeploy(&pool, &app_name, &image, internal_port, host_port)
-        .await;
+        .await
+    {
+        eprintln!("docker: failed to restart {app_name}: {e}");
+        return HttpResponse::InternalServerError().body(e.to_string());
+    }
     HttpResponse::Ok().finish()
 }
 
