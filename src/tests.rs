@@ -523,3 +523,253 @@ async fn test_start_resource_already_running() {
 
     cleanup_resource(pool.get_ref(), id).await;
 }
+
+// ── Delete app tests ──────────────────────────────────────────────────────────
+
+#[actix_web::test]
+async fn test_delete_app() {
+    let scheduler = build_scheduler();
+    let pool = build_pool().await;
+    let app_name = "test-delete-app";
+
+    cleanup_app(pool.get_ref(), app_name).await;
+    Registry::save(pool.get_ref(), app_name, "", "", None, 9010, "stopped")
+        .await
+        .unwrap();
+
+    let app = test::init_service(
+        App::new()
+            .app_data(scheduler)
+            .app_data(pool.clone())
+            .service(delete_app),
+    )
+    .await;
+
+    let req = test::TestRequest::delete()
+        .uri(&format!("/app/{}", app_name))
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status(), 204);
+}
+
+#[actix_web::test]
+async fn test_delete_app_not_found() {
+    let scheduler = build_scheduler();
+    let pool = build_pool().await;
+
+    let app = test::init_service(
+        App::new()
+            .app_data(scheduler)
+            .app_data(pool)
+            .service(delete_app),
+    )
+    .await;
+
+    let req = test::TestRequest::delete()
+        .uri("/app/nonexistent-app-xyz")
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status(), 404);
+}
+
+// ── App env tests ──────────────────────────────────────────────────────────────
+
+#[actix_web::test]
+async fn test_get_app_env_not_found() {
+    let pool = build_pool().await;
+
+    let app = test::init_service(App::new().app_data(pool).service(get_app_env)).await;
+
+    let req = test::TestRequest::get()
+        .uri("/app/nonexistent-app-xyz/env")
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status(), 404);
+}
+
+#[actix_web::test]
+async fn test_get_app_env() {
+    let pool = build_pool().await;
+    let app_name = "test-get-app-env";
+
+    cleanup_app(pool.get_ref(), app_name).await;
+    Registry::save(pool.get_ref(), app_name, "", "", None, 9011, "running")
+        .await
+        .unwrap();
+
+    let app = test::init_service(App::new().app_data(pool.clone()).service(get_app_env)).await;
+
+    let req = test::TestRequest::get()
+        .uri(&format!("/app/{}/env", app_name))
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status(), 200);
+
+    let body: serde_json::Value = test::read_body_json(resp).await;
+    assert!(body.is_object());
+
+    cleanup_app(pool.get_ref(), app_name).await;
+}
+
+#[actix_web::test]
+async fn test_update_app_env_not_found() {
+    let pool = build_pool().await;
+
+    let app = test::init_service(App::new().app_data(pool).service(update_app_env)).await;
+
+    let req = test::TestRequest::put()
+        .uri("/app/nonexistent-app-xyz/env")
+        .set_json(json!({"MY_VAR": "value"}))
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status(), 404);
+}
+
+#[actix_web::test]
+async fn test_update_and_get_app_env() {
+    let pool = build_pool().await;
+    let app_name = "test-update-app-env";
+
+    cleanup_app(pool.get_ref(), app_name).await;
+    Registry::save(pool.get_ref(), app_name, "", "", None, 9012, "running")
+        .await
+        .unwrap();
+
+    let app = test::init_service(
+        App::new()
+            .app_data(pool.clone())
+            .service(update_app_env)
+            .service(get_app_env),
+    )
+    .await;
+
+    let req = test::TestRequest::put()
+        .uri(&format!("/app/{}/env", app_name))
+        .set_json(json!({"FOO": "bar", "BAZ": "qux"}))
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status(), 200);
+
+    let req = test::TestRequest::get()
+        .uri(&format!("/app/{}/env", app_name))
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    let body: serde_json::Value = test::read_body_json(resp).await;
+    assert_eq!(body["FOO"], "bar");
+    assert_eq!(body["BAZ"], "qux");
+
+    cleanup_app(pool.get_ref(), app_name).await;
+}
+
+// ── Logs tests ────────────────────────────────────────────────────────────────
+
+#[actix_web::test]
+async fn test_logs_app_not_found() {
+    let scheduler = build_scheduler();
+    let pool = build_pool().await;
+
+    let app = test::init_service(
+        App::new()
+            .app_data(scheduler)
+            .app_data(pool)
+            .service(logs_app),
+    )
+    .await;
+
+    let req = test::TestRequest::get()
+        .uri("/app/nonexistent-app-xyz/logs")
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status(), 404);
+}
+
+#[actix_web::test]
+async fn test_logs_app_no_container() {
+    let scheduler = build_scheduler();
+    let pool = build_pool().await;
+    let app_name = "test-logs-app-no-container";
+
+    cleanup_app(pool.get_ref(), app_name).await;
+    Registry::save(pool.get_ref(), app_name, "", "", None, 9013, "stopped")
+        .await
+        .unwrap();
+
+    let app = test::init_service(
+        App::new()
+            .app_data(scheduler)
+            .app_data(pool.clone())
+            .service(logs_app),
+    )
+    .await;
+
+    let req = test::TestRequest::get()
+        .uri(&format!("/app/{}/logs", app_name))
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status(), 500);
+
+    cleanup_app(pool.get_ref(), app_name).await;
+}
+
+#[actix_web::test]
+async fn test_logs_resource_invalid_uuid() {
+    let scheduler = build_scheduler();
+    let pool = build_pool().await;
+
+    let app = test::init_service(
+        App::new()
+            .app_data(scheduler)
+            .app_data(pool)
+            .service(logs_resource),
+    )
+    .await;
+
+    let req = test::TestRequest::get()
+        .uri("/resource/not-a-uuid/logs")
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status(), 400);
+}
+
+#[actix_web::test]
+async fn test_logs_resource_not_found() {
+    let scheduler = build_scheduler();
+    let pool = build_pool().await;
+
+    let app = test::init_service(
+        App::new()
+            .app_data(scheduler)
+            .app_data(pool)
+            .service(logs_resource),
+    )
+    .await;
+
+    let req = test::TestRequest::get()
+        .uri(&format!("/resource/{}/logs", Uuid::new_v4()))
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status(), 404);
+}
+
+#[actix_web::test]
+async fn test_logs_resource_no_container() {
+    let scheduler = build_scheduler();
+    let pool = build_pool().await;
+    let id = insert_test_resource(pool.get_ref(), "Logs Test", "redis", "7").await;
+
+    let app = test::init_service(
+        App::new()
+            .app_data(scheduler)
+            .app_data(pool.clone())
+            .service(logs_resource),
+    )
+    .await;
+
+    let req = test::TestRequest::get()
+        .uri(&format!("/resource/{}/logs", id))
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status(), 500);
+
+    cleanup_resource(pool.get_ref(), id).await;
+}
