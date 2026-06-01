@@ -3,6 +3,7 @@ use colored::Colorize;
 use indicatif::{ProgressBar, ProgressStyle};
 use serde::Deserialize;
 use serde_json::Value;
+use std::io::{self, Write};
 use std::time::Duration;
 
 #[derive(Deserialize)]
@@ -26,10 +27,25 @@ fn colored_status(status: &str) -> (String, usize) {
 }
 
 fn print_table(apps: &[App]) {
-    let col_name  = apps.iter().map(|a| a.name.len()).max().unwrap_or(4).max(4);
-    let col_image = apps.iter().map(|a| a.image_id.as_deref().unwrap_or("-").len()).max().unwrap_or(5).max(5);
-    let col_port  = apps.iter().map(|a| a.port.map(|p| p.to_string().len()).unwrap_or(1)).max().unwrap_or(4).max(4);
-    let col_status = apps.iter().map(|a| a.status.as_deref().unwrap_or("unknown").len()).max().unwrap_or(6).max(6);
+    let col_name = apps.iter().map(|a| a.name.len()).max().unwrap_or(4).max(4);
+    let col_image = apps
+        .iter()
+        .map(|a| a.image_id.as_deref().unwrap_or("-").len())
+        .max()
+        .unwrap_or(5)
+        .max(5);
+    let col_port = apps
+        .iter()
+        .map(|a| a.port.map(|p| p.to_string().len()).unwrap_or(1))
+        .max()
+        .unwrap_or(4)
+        .max(4);
+    let col_status = apps
+        .iter()
+        .map(|a| a.status.as_deref().unwrap_or("unknown").len())
+        .max()
+        .unwrap_or(6)
+        .max(6);
     let col_created = 26_usize.max(10);
 
     let sep = format!(
@@ -44,15 +60,22 @@ fn print_table(apps: &[App]) {
     println!("{}", sep);
     println!(
         "| {:<col_name$} | {:<col_image$} | {:<col_port$} | {:<col_status$} | {:<col_created$} |",
-        "name".bold(), "image".bold(), "port".bold(), "status".bold(), "created at".bold(),
-        col_name=col_name, col_image=col_image, col_port=col_port,
-        col_status=col_status, col_created=col_created,
+        "name".bold(),
+        "image".bold(),
+        "port".bold(),
+        "status".bold(),
+        "created at".bold(),
+        col_name = col_name,
+        col_image = col_image,
+        col_port = col_port,
+        col_status = col_status,
+        col_created = col_created,
     );
     println!("{}", sep);
 
     for a in apps {
-        let image   = a.image_id.as_deref().unwrap_or("-");
-        let port    = a.port.map(|p| p.to_string()).unwrap_or_else(|| "-".into());
+        let image = a.image_id.as_deref().unwrap_or("-");
+        let port = a.port.map(|p| p.to_string()).unwrap_or_else(|| "-".into());
         let created = a.created_at.as_deref().unwrap_or("-");
         let raw_status = a.status.as_deref().unwrap_or("unknown");
         let (status_colored, status_len) = colored_status(raw_status);
@@ -60,9 +83,16 @@ fn print_table(apps: &[App]) {
 
         println!(
             "| {:<col_name$} | {:<col_image$} | {:<col_port$} | {}{} | {:<col_created$} |",
-            a.name, image, port, status_colored, " ".repeat(status_pad), created,
-            col_name=col_name, col_image=col_image, col_port=col_port,
-            col_created=col_created,
+            a.name,
+            image,
+            port,
+            status_colored,
+            " ".repeat(status_pad),
+            created,
+            col_name = col_name,
+            col_image = col_image,
+            col_port = col_port,
+            col_created = col_created,
         );
     }
 
@@ -83,34 +113,59 @@ fn spinner(msg: &str) -> ProgressBar {
 }
 
 // POST /app/deploy — exists
-pub async fn deploy(name: &str, image: &str, port: u16) -> Result<(), String> {
-    let pb = spinner(&format!("Deploying {} ({})", name, image));
+fn prompt_for_port() -> Result<u16, String> {
+    loop {
+        print!("Internal application port: ");
+        io::stdout()
+            .flush()
+            .map_err(|e| format!("Failed to write prompt: {e}"))?;
 
+        let mut input = String::new();
+        io::stdin()
+            .read_line(&mut input)
+            .map_err(|e| format!("Failed to read port: {e}"))?;
+
+        match input.trim().parse::<u16>() {
+            Ok(port) if port > 0 => return Ok(port),
+            _ => eprintln!("Enter a port between 1 and 65535."),
+        }
+    }
+}
+
+pub async fn deploy(name: &str, image: &str, mut port: Option<u16>) -> Result<(), String> {
     let client = reqwest::Client::new();
-    let body = serde_json::json!({
-        "name": name,
-        "image": image,
-        "port": port
-    });
+    loop {
+        let pb = spinner(&format!("Deploying {} ({})", name, image));
+        let body = serde_json::json!({
+            "name": name,
+            "image": image,
+            "port": port
+        });
 
-    let resp = client
-        .post(format!("{}/app/deploy", api_base()))
-        .json(&body)
-        .send()
-        .await
-        .map_err(|e| format!("Request failed: {e}"))?;
+        let resp = client
+            .post(format!("{}/app/deploy", api_base()))
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| format!("Request failed: {e}"))?;
 
-    pb.finish_and_clear();
+        pb.finish_and_clear();
 
-    if resp.status().is_success() {
-        println!("{} App {} deployed", "✓".green(), name.bold());
-    } else {
+        if resp.status().is_success() {
+            println!("{} App {} deployed", "✓".green(), name.bold());
+            return Ok(());
+        }
+
         let status = resp.status();
         let text = resp.text().await.unwrap_or_default();
+        if status == reqwest::StatusCode::UNPROCESSABLE_ENTITY && port.is_none() {
+            eprintln!("{text}");
+            port = Some(prompt_for_port()?);
+            continue;
+        }
+
         return Err(format!("Deploy failed ({}): {}", status, text));
     }
-
-    Ok(())
 }
 
 // GET /app — exists

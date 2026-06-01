@@ -46,9 +46,9 @@ enum AppCommands {
         /// Docker image to deploy (e.g. nginx, node:20)
         #[arg(long)]
         image: String,
-        /// Port the container exposes (1-65535)
-        #[arg(long, default_value = "8080", value_parser = clap::value_parser!(u16).range(1..))]
-        port: u16,
+        /// Internal port the application listens on (detected from EXPOSE when omitted)
+        #[arg(long, value_parser = clap::value_parser!(u16).range(1..))]
+        port: Option<u16>,
     },
     /// List all applications
     List,
