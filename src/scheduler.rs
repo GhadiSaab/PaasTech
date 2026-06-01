@@ -1,6 +1,8 @@
 use actix_web::rt::time::sleep;
 use bollard::Docker;
-use bollard::models::{ContainerCreateBody, HostConfig, PortBinding};
+use bollard::models::{
+    ContainerCreateBody, EndpointSettings, HostConfig, NetworkCreateRequest, PortBinding,
+};
 use bollard::query_parameters::{
     CreateContainerOptionsBuilder, CreateImageOptionsBuilder, ListContainersOptionsBuilder,
     RemoveContainerOptionsBuilder, RestartContainerOptionsBuilder, StartContainerOptionsBuilder,
@@ -11,13 +13,89 @@ use futures_util::TryStreamExt;
 use serde::Serialize;
 use sqlx::PgPool;
 use std::collections::HashMap;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crate::registry::Registry;
+
+#[derive(Debug)]
+pub enum DeployError {
+    PortRequired(String),
+    Other(String),
+}
+
+impl std::fmt::Display for DeployError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::PortRequired(message) | Self::Other(message) => f.write_str(message),
+        }
+    }
+}
+
+impl std::error::Error for DeployError {}
 
 pub(crate) fn find_free_port() -> Result<u16, std::io::Error> {
     let listener = std::net::TcpListener::bind("0.0.0.0:0")?;
     Ok(listener.local_addr()?.port())
+}
+
+fn paas_net() -> HashMap<String, EndpointSettings> {
+    let mut m = HashMap::new();
+    m.insert("paas-net".to_string(), EndpointSettings::default());
+    m
+}
+
+fn exposed_tcp_ports(exposed_ports: Option<Vec<String>>) -> Vec<u16> {
+    let mut ports: Vec<u16> = exposed_ports
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|port| {
+            let (port, protocol) = port.split_once('/')?;
+            (protocol == "tcp").then(|| port.parse::<u16>().ok())?
+        })
+        .collect();
+    ports.sort_unstable();
+    ports.dedup();
+    ports
+}
+
+fn image_with_default_tag(image: &str) -> String {
+    let has_tag = match (image.rfind('/'), image.rfind(':')) {
+        (_, None) => false,
+        (Some(slash), Some(colon)) => colon > slash,
+        (None, Some(_)) => true,
+    };
+
+    if image.contains('@') || has_tag {
+        image.to_string()
+    } else {
+        format!("{image}:latest")
+    }
+}
+
+fn traefik_labels(app_name: &str, internal_port: u16) -> HashMap<String, String> {
+    let version = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+        .to_string();
+    let service_name = format!("{app_name}-{version}");
+    let base_domain = std::env::var("BASE_DOMAIN").unwrap_or_else(|_| "localhost".to_string());
+
+    let mut labels = HashMap::new();
+    labels.insert("traefik.enable".to_string(), "true".to_string());
+    labels.insert(
+        format!("traefik.http.routers.{app_name}.rule"),
+        format!("Host(`{app_name}.{base_domain}`)"),
+    );
+    labels.insert(
+        format!("traefik.http.routers.{app_name}.service"),
+        service_name.clone(),
+    );
+    labels.insert(
+        format!("traefik.http.services.{service_name}.loadbalancer.server.port"),
+        internal_port.to_string(),
+    );
+    labels
 }
 
 #[derive(Clone)]
@@ -140,12 +218,8 @@ impl Scheduler {
         }
     }
 
-    async fn pull(&self, image: &str) {
-        let image_with_tag = if image.contains(':') {
-            image.to_string()
-        } else {
-            format!("{image}:latest")
-        };
+    async fn pull(&self, image: &str) -> Result<String, DeployError> {
+        let image_with_tag = image_with_default_tag(image);
 
         let mut stream = self.docker.create_image(
             Some(
@@ -156,37 +230,77 @@ impl Scheduler {
             None,
             None,
         );
-        while stream.next().await.is_some() {}
+        while let Some(result) = stream.next().await {
+            let info = result
+                .map_err(|e| DeployError::Other(format!("Failed to pull image {image}: {e}")))?;
+            if let Some(message) = info.error_detail.and_then(|error| error.message) {
+                return Err(DeployError::Other(format!(
+                    "Failed to pull image {image}: {message}"
+                )));
+            }
+        }
+
+        Ok(image_with_tag)
+    }
+
+    async fn resolve_internal_port(
+        &self,
+        image: &str,
+        requested_port: Option<u16>,
+    ) -> Result<u16, DeployError> {
+        if let Some(port) = requested_port {
+            return Ok(port);
+        }
+
+        let image_info = self
+            .docker
+            .inspect_image(image)
+            .await
+            .map_err(|e| DeployError::Other(format!("Failed to inspect image {image}: {e}")))?;
+        let ports = exposed_tcp_ports(image_info.config.and_then(|config| config.exposed_ports));
+
+        match ports.as_slice() {
+            [port] => Ok(*port),
+            [] => Err(DeployError::PortRequired(format!(
+                "Image {image} does not expose a TCP port. Provide the internal application port."
+            ))),
+            _ => Err(DeployError::PortRequired(format!(
+                "Image {image} exposes multiple TCP ports ({ports:?}). Choose the internal application port."
+            ))),
+        }
+    }
+
+    async fn ensure_paas_net(&self) {
+        if self.docker.inspect_network("paas-net", None).await.is_ok() {
+            return;
+        }
+        let _ = self
+            .docker
+            .create_network(NetworkCreateRequest {
+                name: "paas-net".to_string(),
+                ..Default::default()
+            })
+            .await;
     }
 
     async fn create_and_start(
         &self,
         app_name: &str,
         image: &str,
-        internal_port: Option<u16>,
+        internal_port: u16,
         host_port: u16,
+        labels: HashMap<String, String>,
     ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
-        let (exposed_ports, host_config_body) = match internal_port {
-            Some(cp) => {
-                let port_key = format!("{}/tcp", cp);
-                let mut port_bindings: HashMap<String, Option<Vec<PortBinding>>> = HashMap::new();
-                port_bindings.insert(
-                    port_key.clone(),
-                    Some(vec![PortBinding {
-                        host_ip: Some("0.0.0.0".to_string()),
-                        host_port: Some(host_port.to_string()),
-                    }]),
-                );
-                (
-                    Some(vec![port_key]),
-                    Some(HostConfig {
-                        port_bindings: Some(port_bindings),
-                        ..Default::default()
-                    }),
-                )
-            }
-            None => (None, None),
-        };
+        self.ensure_paas_net().await;
+        let port_key = format!("{}/tcp", internal_port);
+        let mut port_bindings: HashMap<String, Option<Vec<PortBinding>>> = HashMap::new();
+        port_bindings.insert(
+            port_key.clone(),
+            Some(vec![PortBinding {
+                host_ip: Some("0.0.0.0".to_string()),
+                host_port: Some(host_port.to_string()),
+            }]),
+        );
 
         self.docker
             .create_container(
@@ -197,8 +311,15 @@ impl Scheduler {
                 ),
                 ContainerCreateBody {
                     image: Some(image.to_string()),
-                    exposed_ports,
-                    host_config: host_config_body,
+                    exposed_ports: Some(vec![port_key]),
+                    host_config: Some(HostConfig {
+                        port_bindings: Some(port_bindings),
+                        ..Default::default()
+                    }),
+                    labels: Some(labels),
+                    networking_config: Some(bollard::models::NetworkingConfig {
+                        endpoints_config: Some(paas_net()),
+                    }),
                     ..Default::default()
                 },
             )
@@ -231,6 +352,7 @@ impl Scheduler {
         env_vars: Vec<String>,
         binds: Vec<String>,
     ) -> Result<(String, u16), Box<dyn std::error::Error + Send + Sync>> {
+        self.ensure_paas_net().await;
         self.docker
             .create_image(
                 Some(
@@ -279,6 +401,9 @@ impl Scheduler {
                         binds: if binds.is_empty() { None } else { Some(binds) },
                         ..Default::default()
                     }),
+                    networking_config: Some(bollard::models::NetworkingConfig {
+                        endpoints_config: Some(paas_net()),
+                    }),
                     ..Default::default()
                 },
             )
@@ -326,51 +451,11 @@ impl Scheduler {
         app_name: &str,
         image: &str,
         internal_port: Option<u16>,
-    ) {
-        self.pull(image).await;
+    ) -> Result<(), DeployError> {
+        let image = self.pull(image).await?;
+        let internal_port = self.resolve_internal_port(&image, internal_port).await?;
 
-        let host_port = match find_free_port() {
-            Ok(p) => p,
-            Err(e) => {
-                eprintln!("docker: failed to find free port for {app_name}: {e}");
-                return;
-            }
-        };
-
-        let container_id = match self
-            .create_and_start(app_name, image, internal_port, host_port)
-            .await
-        {
-            Ok(id) => id,
-            Err(e) => {
-                eprintln!("docker: failed to create/start {app_name}: {e}");
-                return;
-            }
-        };
-
-        if let Err(e) = Registry::save(
-            pool,
-            app_name,
-            image,
-            &container_id,
-            internal_port.map(|p| p as i32),
-            host_port as i32,
-            "running",
-        )
-        .await
-        {
-            eprintln!("registry: failed to save app {app_name}: {e}");
-        }
-    }
-
-    pub async fn redeploy(
-        &self,
-        pool: &PgPool,
-        app_name: &str,
-        image: &str,
-        internal_port: Option<u16>,
-        host_port: u16,
-    ) {
+        // Stop and remove any existing container only after the replacement is validated.
         let _ = self
             .docker
             .stop_container(
@@ -386,16 +471,88 @@ impl Scheduler {
             )
             .await;
 
-        self.pull(image).await;
+        let host_port = match find_free_port() {
+            Ok(p) => p,
+            Err(e) => {
+                eprintln!("docker: failed to find free port for {app_name}: {e}");
+                return Err(DeployError::Other(format!(
+                    "Failed to find free port for {app_name}: {e}"
+                )));
+            }
+        };
+
+        let labels = traefik_labels(app_name, internal_port);
 
         let container_id = match self
-            .create_and_start(app_name, image, internal_port, host_port)
+            .create_and_start(app_name, &image, internal_port, host_port, labels)
+            .await
+        {
+            Ok(id) => id,
+            Err(e) => {
+                eprintln!("docker: failed to create/start {app_name}: {e}");
+                return Err(DeployError::Other(format!(
+                    "Failed to create/start {app_name}: {e}"
+                )));
+            }
+        };
+
+        if let Err(e) = Registry::save(
+            pool,
+            app_name,
+            &image,
+            &container_id,
+            Some(internal_port as i32),
+            host_port as i32,
+            "running",
+        )
+        .await
+        {
+            return Err(DeployError::Other(format!(
+                "Failed to save app {app_name}: {e}"
+            )));
+        }
+
+        Ok(())
+    }
+
+    pub async fn redeploy(
+        &self,
+        pool: &PgPool,
+        app_name: &str,
+        image: &str,
+        internal_port: Option<u16>,
+        host_port: u16,
+    ) -> Result<(), DeployError> {
+        let image = self.pull(image).await?;
+        let internal_port = self.resolve_internal_port(&image, internal_port).await?;
+
+        let _ = self
+            .docker
+            .stop_container(
+                app_name,
+                Some(StopContainerOptionsBuilder::default().build()),
+            )
+            .await;
+        let _ = self
+            .docker
+            .remove_container(
+                app_name,
+                Some(RemoveContainerOptionsBuilder::default().build()),
+            )
+            .await;
+
+        let labels = traefik_labels(app_name, internal_port);
+
+        let container_id = match self
+            .create_and_start(app_name, &image, internal_port, host_port, labels)
             .await
         {
             Ok(id) => id,
             Err(e) => {
                 eprintln!("docker: failed to recreate {app_name}: {e}");
-                return;
+                return Err(DeployError::Other(format!(
+                    "Failed to recreate {app_name}: {e}"
+                )));
             }
         };
 
@@ -406,5 +563,35 @@ impl Scheduler {
         if let Err(e) = Registry::update_status(pool, app_name, "running").await {
             eprintln!("registry: failed to update status for {app_name}: {e}");
         }
+
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{exposed_tcp_ports, image_with_default_tag};
+
+    #[test]
+    fn exposed_tcp_ports_filters_protocols_and_duplicates() {
+        assert_eq!(
+            exposed_tcp_ports(Some(vec![
+                "443/tcp".to_string(),
+                "53/udp".to_string(),
+                "80/tcp".to_string(),
+                "80/tcp".to_string(),
+            ])),
+            vec![80, 443]
+        );
+    }
+
+    #[test]
+    fn image_with_default_tag_handles_registry_ports() {
+        assert_eq!(image_with_default_tag("nginx"), "nginx:latest");
+        assert_eq!(image_with_default_tag("nginx:alpine"), "nginx:alpine");
+        assert_eq!(
+            image_with_default_tag("localhost:5000/example"),
+            "localhost:5000/example:latest"
+        );
     }
 }

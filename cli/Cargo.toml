@@ -1,0 +1,18 @@
+[package]
+name = "paastech"
+version = "0.1.0"
+edition = "2024"
+
+[[bin]]
+name = "paastech"
+path = "src/main.rs"
+
+[dependencies]
+clap = { version = "4", features = ["derive", "env"] }
+clap_complete = "4"
+reqwest = { version = "0.11", features = ["json", "multipart"] }
+indicatif = "0.17"
+colored = "2"
+tokio = { version = "1", features = ["full"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
