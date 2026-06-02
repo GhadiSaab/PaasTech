@@ -36,15 +36,15 @@ pub struct ContainerInfo {
 impl Scheduler {
     pub fn new() -> Self {
         let docker_host = std::env::var("DOCKER_HOST").unwrap_or_default();
-        let docker = if !docker_host.is_empty() {
-            Docker::connect_with_unix(&docker_host, 120, API_DEFAULT_VERSION)
-        } else {
+        let docker = if docker_host.is_empty() {
             let rootless = format!(
                 "/run/user/{}/docker.sock",
                 std::env::var("UID").unwrap_or_default()
             );
             Docker::connect_with_unix(&rootless, 120, API_DEFAULT_VERSION)
                 .or_else(|_| Docker::connect_with_defaults())
+        } else {
+            Docker::connect_with_defaults()
         }
         .expect("Failed to connect to Docker Engine");
         Self { docker }
