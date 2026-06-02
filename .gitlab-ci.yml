@@ -22,5 +22,4 @@ include:
   - .gitlab/ci/lint.yml
   - .gitlab/ci/test.yml
   - .gitlab/ci/security.yml
-  - .gitlab/ci/documentation.yml
   - .gitlab/ci/build.yml
