@@ -1,9 +1,13 @@
 [config]
 model = "openai/qwen36-27b"
+fallback_models = []
 
 [openai]
 custom_llm_provider = "openai"
 api_base = "https://qwen36.do-2023.dev/v1"
+
+[litellm]
+custom_model_max_tokens = 32000
 
 [pr_reviewer]
 require_tests_review = true
