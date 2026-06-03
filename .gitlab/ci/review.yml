@@ -1,0 +1,19 @@
+
+ai-review:
+  image:
+    name: codiumai/pr-agent:latest
+    entrypoint: [""]
+  stage: review
+  variables:
+    CI_SERVER_URL: $CI_SERVER_URL
+    GITLAB_PERSONAL_ACCESS_TOKEN: $GITLAB_PERSONAL_ACCESS_TOKEN
+    OPENAI__KEY: $AI_REVIEW_API_KEY
+    OPENAI__API_BASE: "https://qwen36.do-2023.dev/v1"
+    CONFIG__MODEL: "openai/qwen36-27b"
+    CONFIG__GIT_PROVIDER: "gitlab"
+  script:
+    - cd /app && python -m pr_agent.cli
+        --pr_url "$CI_PROJECT_URL/merge_requests/$CI_MERGE_REQUEST_IID"
+        review
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"

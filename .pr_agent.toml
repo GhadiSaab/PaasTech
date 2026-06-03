@@ -1,0 +1,12 @@
+[config]
+model = "openai/qwen36-27b"
+
+[openai]
+custom_llm_provider = "openai"
+api_base = "https://qwen36.do-2023.dev/v1"
+
+[pr_reviewer]
+require_tests_review = true
+require_security_review = true
+require_focused_review = true
+inline_code_comments = true
