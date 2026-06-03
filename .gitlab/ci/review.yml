@@ -5,9 +5,6 @@ ai-review:
     entrypoint: [""]
   stage: review
   variables:
-    GITLAB__URL: $CI_SERVER_URL
-    GITLAB__PERSONAL_ACCESS_TOKEN: $GITLAB_PERSONAL_ACCESS_TOKEN
-    OPENAI__KEY: $AI_REVIEW_API_KEY
     OPENAI__API_BASE: "https://qwen36.do-2023.dev/v1"
     CONFIG__MODEL: "openai/qwen36-27b"
     CONFIG__FALLBACK_MODELS: "[]"
@@ -16,8 +13,23 @@ ai-review:
     PR_REVIEWER__EXTRA_INSTRUCTIONS: "Set estimated_effort_to_review_[1-5] to 4."
   script:
     - |
-      [ -n "$GITLAB__PERSONAL_ACCESS_TOKEN" ] || { echo "GITLAB_PERSONAL_ACCESS_TOKEN is not set"; exit 1; }
-      [ -n "$OPENAI__KEY" ] || { echo "AI_REVIEW_API_KEY is not set"; exit 1; }
+      [ -n "$GITLAB_PERSONAL_ACCESS_TOKEN" ] || { echo "GITLAB_PERSONAL_ACCESS_TOKEN is not set"; exit 1; }
+      [ -n "$AI_REVIEW_API_KEY" ] || { echo "AI_REVIEW_API_KEY is not set"; exit 1; }
+
+      export GITLAB__URL="$CI_SERVER_URL"
+      export GITLAB__PERSONAL_ACCESS_TOKEN="$GITLAB_PERSONAL_ACCESS_TOKEN"
+      export OPENAI__KEY="$AI_REVIEW_API_KEY"
+
+      preflight_status="$(curl -sS -o /tmp/ai-review-preflight.json -w "%{http_code}" \
+        -H "Authorization: Bearer $OPENAI__KEY" \
+        -H "Content-Type: application/json" \
+        -d '{"model":"qwen36-27b","messages":[{"role":"user","content":"ping"}],"max_tokens":1}' \
+        "$OPENAI__API_BASE/chat/completions" || true)"
+
+      if [ "$preflight_status" != "200" ]; then
+        echo "AI review model preflight failed with HTTP $preflight_status"
+        exit 1
+      fi
 
       cd /app
       python -m pr_agent.cli \
