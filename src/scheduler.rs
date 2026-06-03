@@ -674,12 +674,11 @@ impl Scheduler {
         let deadline = std::time::Instant::now() + Duration::from_secs(15);
         let mut healthy = false;
         while std::time::Instant::now() < deadline {
-            if let Ok(resp) = client.get(&health_url).send().await {
-                let status = resp.status().as_u16();
-                if (200..500).contains(&status) {
-                    healthy = true;
-                    break;
-                }
+            if let Ok(resp) = client.get(&health_url).send().await
+                && resp.status().is_success()
+            {
+                healthy = true;
+                break;
             }
             sleep(Duration::from_millis(500)).await;
         }
@@ -811,12 +810,11 @@ impl Scheduler {
         let mut healthy = false;
 
         while std::time::Instant::now() < deadline {
-            if let Ok(resp) = client.get(&health_url).send().await {
-                let status = resp.status().as_u16();
-                if (200..500).contains(&status) {
-                    healthy = true;
-                    break;
-                }
+            if let Ok(resp) = client.get(&health_url).send().await
+                && resp.status().is_success()
+            {
+                healthy = true;
+                break;
             }
             sleep(Duration::from_millis(500)).await;
         }
