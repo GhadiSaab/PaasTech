@@ -1,16 +1,15 @@
 [config]
 model = "openai/qwen36-27b"
 fallback_models = []
+custom_model_max_tokens = 32000
 
 [openai]
 custom_llm_provider = "openai"
 api_base = "https://qwen36.do-2023.dev/v1"
-
-[litellm]
-custom_model_max_tokens = 32000
 
 [pr_reviewer]
 require_tests_review = true
 require_security_review = true
 require_focused_review = true
 inline_code_comments = true
+extra_instructions = "Set estimated_effort_to_review_[1-5] to 4."
