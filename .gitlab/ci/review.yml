@@ -5,8 +5,8 @@ ai-review:
     entrypoint: [""]
   stage: review
   variables:
-    CI_SERVER_URL: $CI_SERVER_URL
-    GITLAB_PERSONAL_ACCESS_TOKEN: $GITLAB_PERSONAL_ACCESS_TOKEN
+    GITLAB__URL: $CI_SERVER_URL
+    GITLAB__PERSONAL_ACCESS_TOKEN: $GITLAB_PERSONAL_ACCESS_TOKEN
     OPENAI__KEY: $AI_REVIEW_API_KEY
     OPENAI__API_BASE: "https://qwen36.do-2023.dev/v1"
     CONFIG__MODEL: "openai/qwen36-27b"
