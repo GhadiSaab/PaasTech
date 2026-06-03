@@ -611,9 +611,18 @@ async fn test_delete_app() {
     let app_name = "test-delete-app";
 
     cleanup_app(pool.get_ref(), app_name).await;
-    Registry::save(pool.get_ref(), app_name, "", "", None, 9010, "stopped")
-        .await
-        .unwrap();
+    Registry::save(
+        pool.get_ref(),
+        app_name,
+        "",
+        "",
+        None,
+        9010,
+        "stopped",
+        None,
+    )
+    .await
+    .unwrap();
 
     let app = test::init_service(
         App::new()
@@ -671,9 +680,18 @@ async fn test_get_app_env() {
     let app_name = "test-get-app-env";
 
     cleanup_app(pool.get_ref(), app_name).await;
-    Registry::save(pool.get_ref(), app_name, "", "", None, 9011, "running")
-        .await
-        .unwrap();
+    Registry::save(
+        pool.get_ref(),
+        app_name,
+        "",
+        "",
+        None,
+        9011,
+        "running",
+        None,
+    )
+    .await
+    .unwrap();
 
     let app = test::init_service(App::new().app_data(pool.clone()).service(get_app_env)).await;
 
@@ -709,9 +727,18 @@ async fn test_update_and_get_app_env() {
     let app_name = "test-update-app-env";
 
     cleanup_app(pool.get_ref(), app_name).await;
-    Registry::save(pool.get_ref(), app_name, "", "", None, 9012, "running")
-        .await
-        .unwrap();
+    Registry::save(
+        pool.get_ref(),
+        app_name,
+        "",
+        "",
+        None,
+        9012,
+        "running",
+        None,
+    )
+    .await
+    .unwrap();
 
     let app = test::init_service(
         App::new()
@@ -768,9 +795,18 @@ async fn test_logs_app_no_container() {
     let app_name = "test-logs-app-no-container";
 
     cleanup_app(pool.get_ref(), app_name).await;
-    Registry::save(pool.get_ref(), app_name, "", "", None, 9013, "stopped")
-        .await
-        .unwrap();
+    Registry::save(
+        pool.get_ref(),
+        app_name,
+        "",
+        "",
+        None,
+        9013,
+        "stopped",
+        None,
+    )
+    .await
+    .unwrap();
 
     let app = test::init_service(
         App::new()
