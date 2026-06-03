@@ -5,8 +5,8 @@ use bollard::models::{
 };
 use bollard::query_parameters::{
     CreateContainerOptionsBuilder, CreateImageOptionsBuilder, ListContainersOptionsBuilder,
-    RemoveContainerOptionsBuilder, RestartContainerOptionsBuilder, StartContainerOptionsBuilder,
-    StopContainerOptionsBuilder,
+    LogsOptionsBuilder, RemoveContainerOptionsBuilder, RestartContainerOptionsBuilder,
+    StartContainerOptionsBuilder, StopContainerOptionsBuilder,
 };
 use futures_util::StreamExt;
 use futures_util::TryStreamExt;
@@ -425,6 +425,37 @@ impl Scheduler {
             .unwrap_or_default();
 
         Ok((container_id, host_port))
+    }
+
+    pub async fn get_logs(
+        &self,
+        container_name: &str,
+        tail: Option<usize>,
+    ) -> Result<String, bollard::errors::Error> {
+        let tail_str = tail
+            .map(|n| n.to_string())
+            .unwrap_or_else(|| "all".to_string());
+
+        let mut stream = self.docker.logs(
+            container_name,
+            Some(
+                LogsOptionsBuilder::default()
+                    .stdout(true)
+                    .stderr(true)
+                    .tail(&tail_str)
+                    .build(),
+            ),
+        );
+
+        let mut output = String::new();
+        while let Some(chunk) = stream.next().await {
+            match chunk {
+                Ok(log) => output.push_str(&log.to_string()),
+                Err(e) => return Err(e),
+            }
+        }
+
+        Ok(output)
     }
 
     pub async fn stop_service(&self, service_id: &str) -> Result<(), bollard::errors::Error> {

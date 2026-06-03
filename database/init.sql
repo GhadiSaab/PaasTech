@@ -37,4 +37,11 @@ CREATE TABLE IF NOT EXISTS service_env_vars (
     PRIMARY KEY (service_id, key)
 );
 
+CREATE TABLE IF NOT EXISTS application_env_vars (
+    application_id UUID NOT NULL REFERENCES applications(id) ON DELETE CASCADE,
+    key VARCHAR(255) NOT NULL,
+    value TEXT NOT NULL,
+    PRIMARY KEY (application_id, key)
+);
+
 END;

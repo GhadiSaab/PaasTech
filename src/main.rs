@@ -11,9 +11,9 @@ use actix_web::{
     App, Error, HttpResponse, HttpServer, Responder, delete, error, get, patch, post, put, web,
 };
 use docker::{
-    container_image_for_service, default_env_vars_for_service, docker_image_for_service,
-    fetch_service_versions, is_valid_service, prepare_config_for_service, service_port_for_service,
-    valid_services, validate_docker_tag,
+    connection_env_vars_for_service, container_image_for_service, default_env_vars_for_service,
+    docker_image_for_service, fetch_service_versions, is_valid_service, prepare_config_for_service,
+    service_port_for_service, valid_services, validate_docker_tag,
 };
 use models::{CreateResourcePayload, Resource, UpdateResourcePayload};
 use registry::Registry;
@@ -65,6 +65,11 @@ async fn init() -> Config {
         stop_app,
         restart_app,
         status_app,
+        delete_app,
+        logs_app,
+        logs_resource,
+        get_app_env,
+        update_app_env,
         create_resource,
         get_resources,
         get_resource,
@@ -121,6 +126,11 @@ async fn main() -> std::io::Result<()> {
             .service(stop_app)
             .service(restart_app)
             .service(status_app)
+            .service(delete_app)
+            .service(logs_app)
+            .service(logs_resource)
+            .service(get_app_env)
+            .service(update_app_env)
             .service(create_resource)
             .service(get_resources)
             .service(get_resource)
@@ -424,6 +434,288 @@ async fn status_app(
     HttpResponse::Ok().body(status)
 }
 
+#[utoipa::path(
+    delete,
+    path = "/app/{app_name}",
+    params(("app_name" = String, Path, description = "Application name")),
+    responses(
+        (status = 204, description = "Application deleted"),
+        (status = 404, description = "Application not found"),
+        (status = 500, description = "Internal server error"),
+    ),
+    tag = "apps"
+)]
+#[delete("/app/{app_name}")]
+async fn delete_app(
+    scheduler: web::Data<Scheduler>,
+    pool: web::Data<PgPool>,
+    path: web::Path<String>,
+) -> impl Responder {
+    let app_name = path.into_inner();
+    let app = match Registry::get(&pool, &app_name).await {
+        Ok(Some(app)) => app,
+        Ok(None) => return HttpResponse::NotFound().finish(),
+        Err(e) => {
+            eprintln!("registry: get failed for {app_name}: {e}");
+            return HttpResponse::InternalServerError().finish();
+        }
+    };
+
+    scheduler.stop(&app_name).await;
+
+    let mut tx = match pool.begin().await {
+        Ok(tx) => tx,
+        Err(e) => {
+            eprintln!("registry: failed to begin transaction for {app_name}: {e}");
+            return HttpResponse::InternalServerError().finish();
+        }
+    };
+
+    if let Err(e) = sqlx::query!(
+        "DELETE FROM application_services WHERE application_id = $1",
+        app.id,
+    )
+    .execute(&mut *tx)
+    .await
+    {
+        eprintln!("registry: failed to delete application_services for {app_name}: {e}");
+        return HttpResponse::InternalServerError().finish();
+    }
+
+    if let Err(e) = sqlx::query!("DELETE FROM applications WHERE id = $1", app.id)
+        .execute(&mut *tx)
+        .await
+    {
+        eprintln!("registry: failed to delete application {app_name}: {e}");
+        return HttpResponse::InternalServerError().finish();
+    }
+
+    if let Err(e) = tx.commit().await {
+        eprintln!("registry: failed to commit delete for {app_name}: {e}");
+        return HttpResponse::InternalServerError().finish();
+    }
+
+    HttpResponse::NoContent().finish()
+}
+
+#[derive(Deserialize)]
+struct LogsQuery {
+    tail: Option<usize>,
+}
+
+#[utoipa::path(
+    get,
+    path = "/app/{app_name}/logs",
+    params(
+        ("app_name" = String, Path, description = "Application name"),
+        ("tail" = Option<usize>, Query, description = "Number of lines to return from the end (default: all)"),
+    ),
+    responses(
+        (status = 200, description = "Container logs", content_type = "text/plain"),
+        (status = 404, description = "Application not found"),
+        (status = 500, description = "Internal server error"),
+    ),
+    tag = "apps"
+)]
+#[get("/app/{app_name}/logs")]
+async fn logs_app(
+    scheduler: web::Data<Scheduler>,
+    pool: web::Data<PgPool>,
+    path: web::Path<String>,
+    query: web::Query<LogsQuery>,
+) -> impl Responder {
+    let app_name = path.into_inner();
+    match Registry::get(&pool, &app_name).await {
+        Ok(Some(_)) => {}
+        Ok(None) => return HttpResponse::NotFound().finish(),
+        Err(e) => {
+            eprintln!("registry: get failed for {app_name}: {e}");
+            return HttpResponse::InternalServerError().finish();
+        }
+    }
+
+    match scheduler.get_logs(&app_name, query.tail).await {
+        Ok(logs) => HttpResponse::Ok().content_type("text/plain").body(logs),
+        Err(e) => {
+            eprintln!("docker: failed to get logs for {app_name}: {e}");
+            HttpResponse::InternalServerError().finish()
+        }
+    }
+}
+
+#[utoipa::path(
+    get,
+    path = "/resource/{id}/logs",
+    params(
+        ("id" = String, Path, description = "Resource UUID"),
+        ("tail" = Option<usize>, Query, description = "Number of lines to return from the end (default: all)"),
+    ),
+    responses(
+        (status = 200, description = "Container logs", content_type = "text/plain"),
+        (status = 400, description = "Invalid UUID"),
+        (status = 404, description = "Resource not found"),
+        (status = 500, description = "Internal server error"),
+    ),
+    tag = "resources"
+)]
+#[get("/resource/{id}/logs")]
+async fn logs_resource(
+    scheduler: web::Data<Scheduler>,
+    pool: web::Data<PgPool>,
+    id: web::Path<String>,
+    query: web::Query<LogsQuery>,
+) -> Result<impl Responder, Error> {
+    let uuid = Uuid::parse_str(&id).map_err(|_| error::ErrorBadRequest("Invalid resource id"))?;
+
+    sqlx::query!("SELECT id FROM services WHERE id = $1", uuid)
+        .fetch_optional(pool.get_ref())
+        .await
+        .map_err(error::ErrorInternalServerError)?
+        .ok_or_else(|| error::ErrorNotFound("Resource not found"))?;
+
+    let logs = scheduler
+        .get_logs(&uuid.to_string(), query.tail)
+        .await
+        .map_err(|e| error::ErrorInternalServerError(format!("Failed to get logs: {e}")))?;
+
+    Ok(HttpResponse::Ok().content_type("text/plain").body(logs))
+}
+
+async fn inject_service_env_into_app(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    app_uuid: Uuid,
+    service_name: &str,
+    host_port: u16,
+    service_env: &HashMap<String, String>,
+) -> Result<(), sqlx::Error> {
+    for (key, value) in connection_env_vars_for_service(service_name, host_port, service_env) {
+        sqlx::query!(
+            "INSERT INTO application_env_vars (application_id, key, value) VALUES ($1, $2, $3) ON CONFLICT (application_id, key) DO UPDATE SET value = EXCLUDED.value",
+            app_uuid,
+            key,
+            value,
+        )
+        .execute(&mut **tx)
+        .await?;
+    }
+    Ok(())
+}
+
+#[utoipa::path(
+    get,
+    path = "/app/{app_name}/env",
+    params(("app_name" = String, Path, description = "Application name")),
+    responses(
+        (status = 200, description = "Environment variables as key-value map"),
+        (status = 404, description = "Application not found"),
+        (status = 500, description = "Internal server error"),
+    ),
+    tag = "apps"
+)]
+#[get("/app/{app_name}/env")]
+async fn get_app_env(pool: web::Data<PgPool>, path: web::Path<String>) -> impl Responder {
+    let app_name = path.into_inner();
+    let app = match Registry::get(&pool, &app_name).await {
+        Ok(Some(app)) => app,
+        Ok(None) => return HttpResponse::NotFound().finish(),
+        Err(e) => {
+            eprintln!("registry: get failed for {app_name}: {e}");
+            return HttpResponse::InternalServerError().finish();
+        }
+    };
+
+    let rows = match sqlx::query!(
+        "SELECT key, value FROM application_env_vars WHERE application_id = $1 ORDER BY key",
+        app.id,
+    )
+    .fetch_all(pool.get_ref())
+    .await
+    {
+        Ok(rows) => rows,
+        Err(e) => {
+            eprintln!("registry: failed to fetch env vars for {app_name}: {e}");
+            return HttpResponse::InternalServerError().finish();
+        }
+    };
+
+    let env_map: HashMap<String, String> = rows.into_iter().map(|r| (r.key, r.value)).collect();
+    HttpResponse::Ok().json(env_map)
+}
+
+#[utoipa::path(
+    put,
+    path = "/app/{app_name}/env",
+    params(("app_name" = String, Path, description = "Application name")),
+    request_body(
+        content_type = "application/json",
+        description = "Environment variables as key-value map (replaces all existing variables)"
+    ),
+    responses(
+        (status = 200, description = "Environment variables updated"),
+        (status = 404, description = "Application not found"),
+        (status = 500, description = "Internal server error"),
+    ),
+    tag = "apps"
+)]
+#[put("/app/{app_name}/env")]
+async fn update_app_env(
+    pool: web::Data<PgPool>,
+    path: web::Path<String>,
+    payload: web::Json<HashMap<String, String>>,
+) -> impl Responder {
+    let app_name = path.into_inner();
+    let app = match Registry::get(&pool, &app_name).await {
+        Ok(Some(app)) => app,
+        Ok(None) => return HttpResponse::NotFound().finish(),
+        Err(e) => {
+            eprintln!("registry: get failed for {app_name}: {e}");
+            return HttpResponse::InternalServerError().finish();
+        }
+    };
+
+    let mut tx = match pool.begin().await {
+        Ok(tx) => tx,
+        Err(e) => {
+            eprintln!("registry: failed to begin transaction for {app_name}: {e}");
+            return HttpResponse::InternalServerError().finish();
+        }
+    };
+
+    if let Err(e) = sqlx::query!(
+        "DELETE FROM application_env_vars WHERE application_id = $1",
+        app.id,
+    )
+    .execute(&mut *tx)
+    .await
+    {
+        eprintln!("registry: failed to delete env vars for {app_name}: {e}");
+        return HttpResponse::InternalServerError().finish();
+    }
+
+    for (key, value) in payload.iter() {
+        if let Err(e) = sqlx::query!(
+            "INSERT INTO application_env_vars (application_id, key, value) VALUES ($1, $2, $3)",
+            app.id,
+            key,
+            value,
+        )
+        .execute(&mut *tx)
+        .await
+        {
+            eprintln!("registry: failed to insert env var for {app_name}: {e}");
+            return HttpResponse::InternalServerError().finish();
+        }
+    }
+
+    if let Err(e) = tx.commit().await {
+        eprintln!("registry: failed to commit env vars for {app_name}: {e}");
+        return HttpResponse::InternalServerError().finish();
+    }
+
+    HttpResponse::Ok()
+        .body("Environment variables updated. Restart the application to apply changes.")
+}
+
 #[cfg(test)]
 mod tests;
 
@@ -535,6 +827,23 @@ async fn create_resource(
     .execute(&mut *tx)
     .await
     .map_err(error::ErrorInternalServerError)?;
+
+    if let Some(app_id) = &payload.application_id
+        && !app_id.is_empty()
+    {
+        let app_uuid = Uuid::parse_str(app_id)
+            .map_err(|_| error::ErrorBadRequest("Invalid application_id"))?;
+        let service_env_map: HashMap<String, String> = default_env.iter().cloned().collect();
+        inject_service_env_into_app(
+            &mut tx,
+            app_uuid,
+            &payload.name,
+            host_port,
+            &service_env_map,
+        )
+        .await
+        .map_err(error::ErrorInternalServerError)?;
+    }
 
     tx.commit().await.map_err(error::ErrorInternalServerError)?;
 
@@ -699,7 +1008,7 @@ async fn update_resource(
         .await
         .map_err(error::ErrorInternalServerError)?;
 
-        for app_uuid in app_uuids {
+        for &app_uuid in &app_uuids {
             sqlx::query!(
                 "INSERT INTO application_services (application_id, service_id) VALUES ($1, $2)",
                 app_uuid,
@@ -708,6 +1017,36 @@ async fn update_resource(
             .execute(&mut *tx)
             .await
             .map_err(error::ErrorInternalServerError)?;
+        }
+
+        let service_info = sqlx::query!("SELECT name, port FROM services WHERE id = $1", uuid)
+            .fetch_one(&mut *tx)
+            .await
+            .map_err(error::ErrorInternalServerError)?;
+
+        if let Some(port) = service_info.port {
+            let service_env: HashMap<String, String> = sqlx::query!(
+                "SELECT key, value FROM service_env_vars WHERE service_id = $1 ORDER BY key",
+                uuid
+            )
+            .fetch_all(&mut *tx)
+            .await
+            .map_err(error::ErrorInternalServerError)?
+            .into_iter()
+            .map(|r| (r.key, r.value))
+            .collect();
+
+            for &app_uuid in &app_uuids {
+                inject_service_env_into_app(
+                    &mut tx,
+                    app_uuid,
+                    &service_info.name,
+                    port as u16,
+                    &service_env,
+                )
+                .await
+                .map_err(error::ErrorInternalServerError)?;
+            }
         }
     }
 
