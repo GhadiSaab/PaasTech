@@ -23,6 +23,7 @@ pub(crate) fn find_free_port() -> Result<u16, std::io::Error> {
 #[derive(Clone)]
 pub struct Scheduler {
     docker: Docker,
+    docker_host: String,
 }
 
 #[derive(Serialize)]
@@ -43,7 +44,14 @@ impl Scheduler {
             Docker::connect_with_socket(docker_host.as_str(), 120, API_DEFAULT_VERSION)
         }
         .expect("Failed to connect to Docker API. If the socket was wrong, plz check the .env");
-        Self { docker }
+        Self {
+            docker,
+            docker_host,
+        }
+    }
+
+    pub fn docker_host(&self) -> &str {
+        &self.docker_host
     }
 
     pub async fn stop(&self, app_name: &str) {
