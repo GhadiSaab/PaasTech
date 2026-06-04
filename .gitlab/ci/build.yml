@@ -43,9 +43,6 @@ docker-build:
 docker-tag:
   extends: .docker-base
   stage: publish
-  needs:
-    - job: test
-    - job: audit
   script:
     - |
       docker buildx build \
