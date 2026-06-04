@@ -19,6 +19,7 @@ use crate::registry::Registry;
 
 #[derive(Debug)]
 pub enum DeployError {
+    AppNotFound(String),
     PortRequired(String),
     Other(String),
 }
@@ -26,7 +27,9 @@ pub enum DeployError {
 impl std::fmt::Display for DeployError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::PortRequired(message) | Self::Other(message) => f.write_str(message),
+            Self::AppNotFound(message) | Self::PortRequired(message) | Self::Other(message) => {
+                f.write_str(message)
+            }
         }
     }
 }
@@ -79,15 +82,16 @@ fn build_traefik_labels(
     base_domain: &str,
 ) -> HashMap<String, String> {
     let service_name = format!("{app_name}-{version}");
+    let router_name = &service_name;
 
     let mut labels = HashMap::new();
     labels.insert("traefik.enable".to_string(), "true".to_string());
     labels.insert(
-        format!("traefik.http.routers.{app_name}.rule"),
+        format!("traefik.http.routers.{router_name}.rule"),
         format!("Host(`{app_name}.{base_domain}`)"),
     );
     labels.insert(
-        format!("traefik.http.routers.{app_name}.service"),
+        format!("traefik.http.routers.{router_name}.service"),
         service_name.clone(),
     );
     labels.insert(
@@ -611,8 +615,11 @@ impl Scheduler {
         internal_port: Option<u16>,
         env: Vec<String>,
         base_domain: Option<&str>,
-    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        let existing = Registry::get(pool, name).await?.ok_or("app not found")?;
+    ) -> Result<(), DeployError> {
+        let existing = Registry::get(pool, name)
+            .await
+            .map_err(|e| DeployError::Other(format!("Failed to load app {name}: {e}")))?
+            .ok_or_else(|| DeployError::AppNotFound(format!("app not found: {name}")))?;
         let domain = resolve_domain(base_domain.or(existing.base_domain.as_deref()));
         let image = self.pull(new_image).await?;
         let internal_port = self.resolve_internal_port(&image, internal_port).await?;
@@ -624,7 +631,9 @@ impl Scheduler {
             .to_string();
         let canary_name = format!("{name}-canary-{version}");
 
-        let canary_port = find_free_port()?;
+        let canary_port = find_free_port().map_err(|e| {
+            DeployError::Other(format!("Failed to find canary port for {name}: {e}"))
+        })?;
         let port_key = format!("{}/tcp", internal_port);
         let mut port_bindings: HashMap<String, Option<Vec<PortBinding>>> = HashMap::new();
         port_bindings.insert(
@@ -657,19 +666,26 @@ impl Scheduler {
                     ..Default::default()
                 },
             )
-            .await?;
+            .await
+            .map_err(|e| {
+                DeployError::Other(format!("Failed to create canary {canary_name}: {e}"))
+            })?;
 
         self.docker
             .start_container(
                 &canary_name,
                 Some(StartContainerOptionsBuilder::default().build()),
             )
-            .await?;
+            .await
+            .map_err(|e| {
+                DeployError::Other(format!("Failed to start canary {canary_name}: {e}"))
+            })?;
 
         let health_url = format!("http://localhost:{canary_port}/health");
         let client = reqwest::Client::builder()
             .timeout(Duration::from_millis(500))
-            .build()?;
+            .build()
+            .map_err(|e| DeployError::Other(format!("Failed to build health client: {e}")))?;
 
         let deadline = std::time::Instant::now() + Duration::from_secs(15);
         let mut healthy = false;
@@ -698,7 +714,9 @@ impl Scheduler {
                     Some(RemoveContainerOptionsBuilder::default().build()),
                 )
                 .await;
-            return Err("health probe timed out after 15s; old container left running".into());
+            return Err(DeployError::Other(
+                "health probe timed out after 15s; old container left running".to_string(),
+            ));
         }
 
         // Release the app name without stopping the old container. Its Traefik labels
@@ -721,21 +739,13 @@ impl Scheduler {
                         Some(RemoveContainerOptionsBuilder::default().build()),
                     )
                     .await;
-                return Err(e.into());
+                return Err(DeployError::Other(format!(
+                    "Failed to find production port for {name}: {e}"
+                )));
             }
         };
         let mut labels = build_traefik_labels(name, internal_port, &version, &domain);
         let router_name = format!("{name}-{version}");
-        labels.remove(&format!("traefik.http.routers.{name}.rule"));
-        labels.remove(&format!("traefik.http.routers.{name}.service"));
-        labels.insert(
-            format!("traefik.http.routers.{router_name}.rule"),
-            format!("Host(`{name}.{domain}`)"),
-        );
-        labels.insert(
-            format!("traefik.http.routers.{router_name}.service"),
-            format!("{name}-{version}"),
-        );
         labels.insert(
             format!("traefik.http.routers.{router_name}.priority"),
             version.clone(),
@@ -764,7 +774,9 @@ impl Scheduler {
                     Some(RemoveContainerOptionsBuilder::default().build()),
                 )
                 .await;
-            return Err(e.into());
+            return Err(DeployError::Other(format!(
+                "Failed to rename {name} to {old_name}: {e}"
+            )));
         }
 
         let final_id = match self
@@ -801,7 +813,9 @@ impl Scheduler {
                         Some(RemoveContainerOptionsBuilder::default().build()),
                     )
                     .await;
-                return Err(e);
+                return Err(DeployError::Other(format!(
+                    "Failed to create/start replacement {name}: {e}"
+                )));
             }
         };
 
@@ -848,9 +862,76 @@ impl Scheduler {
                     Some(RemoveContainerOptionsBuilder::default().build()),
                 )
                 .await;
-            return Err(
-                "production health probe timed out after 15s; old container left running".into(),
-            );
+            return Err(DeployError::Other(
+                "production health probe timed out after 15s; old container left running"
+                    .to_string(),
+            ));
+        }
+
+        let mut registry_error = None;
+        for attempt in 1..=3 {
+            match Registry::upsert(
+                pool,
+                name,
+                &image,
+                &final_id,
+                Some(internal_port as i32),
+                final_port as i32,
+                "running",
+                Some(&domain),
+            )
+            .await
+            {
+                Ok(_) => break,
+                Err(e) if attempt < 3 => {
+                    eprintln!("registry: failed to update {name} on attempt {attempt}: {e}");
+                    sleep(Duration::from_millis(250 * attempt)).await;
+                }
+                Err(e) => {
+                    registry_error = Some(e);
+                    break;
+                }
+            }
+        }
+
+        if let Some(e) = registry_error {
+            let _ = self
+                .docker
+                .remove_container(
+                    name,
+                    Some(RemoveContainerOptionsBuilder::default().force(true).build()),
+                )
+                .await;
+            let rollback = self
+                .docker
+                .rename_container(
+                    &old_name,
+                    RenameContainerOptionsBuilder::default().name(name).build(),
+                )
+                .await;
+            let _ = self
+                .docker
+                .stop_container(
+                    &canary_name,
+                    Some(StopContainerOptionsBuilder::default().build()),
+                )
+                .await;
+            let _ = self
+                .docker
+                .remove_container(
+                    &canary_name,
+                    Some(RemoveContainerOptionsBuilder::default().build()),
+                )
+                .await;
+
+            return match rollback {
+                Ok(()) => Err(DeployError::Other(format!(
+                    "Failed to update registry for {name}: {e}; rolled back to previous container"
+                ))),
+                Err(rollback_error) => Err(DeployError::Other(format!(
+                    "Failed to update registry for {name}: {e}; rollback failed: {rollback_error}"
+                ))),
+            };
         }
 
         // Traefik batches Docker provider updates. Keep the old backend alive until
@@ -888,25 +969,13 @@ impl Scheduler {
             )
             .await;
 
-        Registry::upsert(
-            pool,
-            name,
-            &image,
-            &final_id,
-            Some(internal_port as i32),
-            final_port as i32,
-            "running",
-            Some(&domain),
-        )
-        .await?;
-
         Ok(())
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{exposed_tcp_ports, image_with_default_tag};
+    use super::{build_traefik_labels, exposed_tcp_ports, image_with_default_tag};
 
     #[test]
     fn exposed_tcp_ports_filters_protocols_and_duplicates() {
@@ -919,6 +988,26 @@ mod tests {
             ])),
             vec![80, 443]
         );
+    }
+
+    #[test]
+    fn build_traefik_labels_uses_versioned_router_and_service_names() {
+        let labels = build_traefik_labels("api", 8080, "123", "example.com");
+
+        assert_eq!(
+            labels.get("traefik.http.routers.api-123.rule"),
+            Some(&"Host(`api.example.com`)".to_string())
+        );
+        assert_eq!(
+            labels.get("traefik.http.routers.api-123.service"),
+            Some(&"api-123".to_string())
+        );
+        assert_eq!(
+            labels.get("traefik.http.services.api-123.loadbalancer.server.port"),
+            Some(&"8080".to_string())
+        );
+        assert!(!labels.contains_key("traefik.http.routers.api.rule"));
+        assert!(!labels.contains_key("traefik.http.routers.api.service"));
     }
 
     #[test]

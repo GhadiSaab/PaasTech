@@ -314,6 +314,7 @@ async fn deploy_app(
         .await
     {
         Ok(()) => HttpResponse::Ok().finish(),
+        Err(DeployError::AppNotFound(message)) => HttpResponse::NotFound().body(message),
         Err(DeployError::PortRequired(message)) => {
             HttpResponse::UnprocessableEntity().body(message)
         }
@@ -339,6 +340,7 @@ struct UpdateBody {
     responses(
         (status = 200, description = "Rolling update completed"),
         (status = 404, description = "Application not found"),
+        (status = 422, description = "Internal application port is required"),
         (status = 500, description = "Rolling update failed"),
     ),
     tag = "apps"
@@ -363,13 +365,13 @@ async fn update_app(
         .await
     {
         Ok(()) => HttpResponse::Ok().finish(),
-        Err(e) => {
-            let msg = e.to_string();
-            if msg.contains("app not found") {
-                HttpResponse::NotFound().body(msg)
-            } else {
-                HttpResponse::InternalServerError().body(msg)
-            }
+        Err(DeployError::AppNotFound(message)) => HttpResponse::NotFound().body(message),
+        Err(DeployError::PortRequired(message)) => {
+            HttpResponse::UnprocessableEntity().body(message)
+        }
+        Err(DeployError::Other(message)) => {
+            eprintln!("update: failed to update {app_name}: {message}");
+            HttpResponse::InternalServerError().body(message)
         }
     }
 }
