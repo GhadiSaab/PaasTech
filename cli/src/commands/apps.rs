@@ -195,7 +195,11 @@ pub async fn restart(name: &str) -> Result<(), String> {
 
 // DELETE /app/{name}
 pub async fn delete(name: &str) -> Result<(), String> {
-    let url = app_url(name, "delete")?;
+    let mut url = reqwest::Url::parse(&api_base()).map_err(|e| format!("Invalid API URL: {e}"))?;
+    url.path_segments_mut()
+        .map_err(|_| "API URL cannot be a base".to_string())?
+        .extend(&["app", name]);
+    let url = url;
     let pb = spinner(&format!("Deleting {}...", name));
     let client = reqwest::Client::new();
     let resp = client
