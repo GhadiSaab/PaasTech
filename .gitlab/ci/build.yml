@@ -9,7 +9,10 @@
     DOCKER_TLS_CERTDIR: ""
     DOCKER_BUILDKIT: "1"
   before_script:
-    - docker login -u $CI_REGISTRY_USER -p $CI_REGISTRY_PASSWORD $CI_REGISTRY
+    - docker login -u "$CI_REGISTRY_USER" -p "$CI_REGISTRY_PASSWORD" "$CI_REGISTRY"
+    - docker run --rm --privileged multiarch/qemu-user-static --reset -p yes
+    - docker buildx create --use --name multiarch --driver docker-container --driver-opt network=host
+    - docker buildx inspect --bootstrap
 
 docker-build:
   extends: .docker-base
@@ -18,24 +21,41 @@ docker-build:
     - job: test
     - job: audit
   script:
-    - docker pull $CI_REGISTRY_IMAGE:latest || true
     - |
-      docker build \
-        --cache-from $CI_REGISTRY_IMAGE:latest \
-        --build-arg BUILDKIT_INLINE_CACHE=1 \
-        -t $CI_REGISTRY_IMAGE:latest \
+      docker buildx build \
+        --platform linux/amd64,linux/arm64 \
+        --cache-from "type=registry,ref=$CI_REGISTRY_IMAGE:buildcache" \
+        --cache-to "type=registry,ref=$CI_REGISTRY_IMAGE:buildcache,mode=max" \
+        -t "$CI_REGISTRY_IMAGE:$CI_COMMIT_SHORT_SHA" \
+        -t "$CI_REGISTRY_IMAGE:edge" \
+        --push \
         .
-    - docker push $CI_REGISTRY_IMAGE:latest
   rules:
     - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+      changes:
+        - src/**/*
+        - Cargo.toml
+        - Cargo.lock
+        - database/**/*
+        - services/**/*
+        - .sqlx/**/*
+        - Dockerfile
 
 docker-tag:
   extends: .docker-base
   stage: publish
-  needs: []
+  needs:
+    - job: test
+    - job: audit
   script:
-    - docker pull $CI_REGISTRY_IMAGE:latest
-    - docker tag $CI_REGISTRY_IMAGE:latest $CI_REGISTRY_IMAGE:$CI_COMMIT_TAG
-    - docker push $CI_REGISTRY_IMAGE:$CI_COMMIT_TAG
+    - |
+      docker buildx build \
+        --platform linux/amd64,linux/arm64 \
+        --cache-from "type=registry,ref=$CI_REGISTRY_IMAGE:buildcache" \
+        --cache-to "type=registry,ref=$CI_REGISTRY_IMAGE:buildcache,mode=max" \
+        -t "$CI_REGISTRY_IMAGE:$CI_COMMIT_TAG" \
+        -t "$CI_REGISTRY_IMAGE:latest" \
+        --push \
+        .
   rules:
     - if: $CI_COMMIT_TAG
