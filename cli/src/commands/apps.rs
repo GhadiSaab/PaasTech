@@ -248,9 +248,20 @@ pub async fn restart(name: &str) -> Result<(), String> {
 
 // DELETE /app/{name} — NOT implemented on server
 pub async fn delete(name: &str) -> Result<(), String> {
-    // TODO: route DELETE /app/{name} not yet implemented on server
-    println!("{}", "This command is not yet available".yellow());
-    let _ = name;
+    let url = app_url(name, "delete")?;
+    let client = reqwest::Client::new();
+    let resp = client
+        .delete(url)
+        .send()
+        .await
+        .map_err(|e| format!("Request failed: {e}"))?;
+
+    match resp.status().as_u16() {
+        200 => println!("{} App {} restarted", "✓".green(), name.bold()),
+        404 => return Err(format!("App '{}' not found", name)),
+        code => return Err(format!("Server error: {}", code)),
+    }
+
     Ok(())
 }
 
