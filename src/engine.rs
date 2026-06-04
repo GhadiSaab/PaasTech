@@ -2,7 +2,7 @@ use actix_multipart::Multipart;
 use actix_web::{Error, web};
 use futures_util::TryStreamExt;
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use tokio::fs::File;
 use tokio::io::AsyncWriteExt;
 use tokio::process::Command as TokioCommand;
@@ -72,21 +72,6 @@ fn docker_host() -> String {
         .ok()
         .filter(|v| !v.is_empty())
         .unwrap_or_else(|| "unix:///var/run/docker.sock".to_string())
-}
-
-pub fn read_procfile_command(from: &Path) -> Option<String> {
-    let procfile_path = from.join("Procfile");
-    let content = std::fs::read_to_string(procfile_path).ok()?;
-    for line in content.lines() {
-        let line = line.trim();
-        if let Some(cmd) = line.strip_prefix("web:") {
-            let cmd = cmd.trim();
-            if !cmd.is_empty() {
-                return Some(cmd.to_string());
-            }
-        }
-    }
-    None
 }
 
 pub async fn build_image(from: PathBuf) -> Result<String, String> {

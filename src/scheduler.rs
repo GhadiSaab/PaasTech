@@ -36,17 +36,13 @@ pub struct ContainerInfo {
 impl Scheduler {
     pub fn new() -> Self {
         let docker_host = std::env::var("DOCKER_HOST").unwrap_or_default();
+
         let docker = if docker_host.is_empty() {
-            let rootless = format!(
-                "/run/user/{}/docker.sock",
-                std::env::var("UID").unwrap_or_default()
-            );
-            Docker::connect_with_unix(&rootless, 120, API_DEFAULT_VERSION)
-                .or_else(|_| Docker::connect_with_defaults())
-        } else {
             Docker::connect_with_defaults()
+        } else {
+            Docker::connect_with_socket(docker_host.as_str(), 120, API_DEFAULT_VERSION)
         }
-        .expect("Failed to connect to Docker Engine");
+        .expect("Failed to connect to Docker API. If the socket was wrong, plz check the .env");
         Self { docker }
     }
 
@@ -175,7 +171,6 @@ impl Scheduler {
         image: &str,
         internal_port: Option<u16>,
         host_port: u16,
-        cmd: Option<Vec<String>>,
     ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
         let (exposed_ports, host_config_body) = match internal_port {
             Some(cp) => {
@@ -208,7 +203,6 @@ impl Scheduler {
                 ),
                 ContainerCreateBody {
                     image: Some(image.to_string()),
-                    cmd,
                     exposed_ports,
                     host_config: host_config_body,
                     ..Default::default()
@@ -338,7 +332,6 @@ impl Scheduler {
         app_name: &str,
         image: &str,
         internal_port: Option<u16>,
-        cmd: Option<Vec<String>>,
     ) {
         self.pull(image).await;
 
@@ -351,7 +344,7 @@ impl Scheduler {
         };
 
         let container_id = match self
-            .create_and_start(app_name, image, internal_port, host_port, cmd)
+            .create_and_start(app_name, image, internal_port, host_port)
             .await
         {
             Ok(id) => id,
@@ -401,7 +394,7 @@ impl Scheduler {
         self.pull(image).await;
 
         let container_id = match self
-            .create_and_start(app_name, image, internal_port, host_port, None)
+            .create_and_start(app_name, image, internal_port, host_port)
             .await
         {
             Ok(id) => id,
