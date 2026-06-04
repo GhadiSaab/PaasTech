@@ -274,7 +274,13 @@ async fn upload_app(
         let _ = fs::remove_dir_all(&extracted_folder).await;
 
         if let Err(e) = scheduler_bg
-            .deploy(pool_bg.get_ref(), &name_bg, &image_name, internal_port, None)
+            .deploy(
+                pool_bg.get_ref(),
+                &name_bg,
+                &image_name,
+                internal_port,
+                None,
+            )
             .await
         {
             eprintln!("deploy: failed for {name_bg}: {e}");
@@ -331,7 +337,13 @@ async fn deploy_app(
     body: web::Json<DeployBody>,
 ) -> HttpResponse {
     match scheduler
-        .deploy(&pool, &body.name, &body.image, body.port, body.base_domain.as_deref())
+        .deploy(
+            &pool,
+            &body.name,
+            &body.image,
+            body.port,
+            body.base_domain.as_deref(),
+        )
         .await
     {
         Ok(()) => HttpResponse::Ok().finish(),

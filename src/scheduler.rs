@@ -272,7 +272,10 @@ impl Scheduler {
         let internal_port = match app.internal_port {
             Some(port) => port as u16,
             None => {
-                eprintln!("watch: cannot recreate {}: no internal_port recorded", app.name);
+                eprintln!(
+                    "watch: cannot recreate {}: no internal_port recorded",
+                    app.name
+                );
                 return;
             }
         };

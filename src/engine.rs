@@ -70,8 +70,7 @@ pub async fn extract_zip(source: PathBuf) -> Result<PathBuf, String> {
 pub async fn build_image(from: String, docker_host: &str) -> Result<String, String> {
     let image_name = format!("paastech-{}", Uuid::new_v4());
 
-    let builder = std::env::var("BUILDER")
-        .map_err(|_| "BUILDER env var is not set".to_string())?;
+    let builder = std::env::var("BUILDER").map_err(|_| "BUILDER env var is not set".to_string())?;
 
     let mut cmd = TokioCommand::new("pack");
     cmd.args(["build", &image_name, "--path", &from, "--builder", &builder]);
