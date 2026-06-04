@@ -269,7 +269,13 @@ impl Scheduler {
                 return;
             }
         };
-        let internal_port = app.internal_port.map(|port| port as u16);
+        let internal_port = match app.internal_port {
+            Some(port) => port as u16,
+            None => {
+                eprintln!("watch: cannot recreate {}: no internal_port recorded", app.name);
+                return;
+            }
+        };
         let host_port = match app.port {
             Some(port) => port as u16,
             None => match find_free_port() {
@@ -445,6 +451,7 @@ impl Scheduler {
                 ),
                 ContainerCreateBody {
                     image: Some(image.to_string()),
+                    env: Some(vec![format!("PORT={internal_port}")]),
                     exposed_ports: Some(vec![port_key]),
                     host_config: Some(HostConfig {
                         port_bindings: Some(port_bindings),
@@ -615,10 +622,11 @@ impl Scheduler {
         pool: &PgPool,
         app_name: &str,
         image: &str,
-        internal_port: u16,
+        internal_port: Option<u16>,
         base_domain: Option<&str>,
     ) -> Result<(), DeployError> {
         let image = self.pull(image).await?;
+        let internal_port = self.resolve_internal_port(&image, internal_port).await?;
 
         let host_port = find_free_port().map_err(|e| {
             DeployError::Other(format!("Failed to find free port for {app_name}: {e}"))
@@ -632,7 +640,7 @@ impl Scheduler {
             .await
             .map_err(|e| DeployError::Other(format!("Failed to create/start {app_name}: {e}")))?;
 
-        Registry::save(
+        Registry::upsert(
             pool,
             app_name,
             &image,
@@ -743,7 +751,11 @@ impl Scheduler {
                 ),
                 ContainerCreateBody {
                     image: Some(image.clone()),
-                    env: if env.is_empty() { None } else { Some(env) },
+                    env: {
+                        let mut e = env;
+                        e.push(format!("PORT={internal_port}"));
+                        Some(e)
+                    },
                     exposed_ports: Some(vec![port_key]),
                     host_config: Some(HostConfig {
                         port_bindings: Some(port_bindings),

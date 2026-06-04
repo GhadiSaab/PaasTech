@@ -228,38 +228,61 @@ async fn upload_app(
 
     let internal_port = fields
         .get("internal_port")
-        .and_then(|p| p.trim().parse::<u16>().ok())
-        .ok_or_else(|| {
-            error::ErrorBadRequest(
-                "internal_port is required: specify the port your web app listens on",
-            )
-        })?;
+        .and_then(|p| p.trim().parse::<u16>().ok());
 
     let name = format!("paastech-{}", Uuid::new_v4());
-
-    println!("Zip file uploaded to {:?}", zip_filepath);
 
     let extracted_folder = extract_zip(zip_filepath)
         .await
         .map_err(error::ErrorInternalServerError)?;
 
-    let image_name = match build_image(
-        extracted_folder.to_string_lossy().to_string(),
-        scheduler.docker_host(),
+    if let Err(e) = Registry::save(
+        &pool,
+        &name,
+        "",
+        "",
+        internal_port.map(|p| p as i32),
+        0,
+        "building",
+        None,
     )
     .await
     {
-        Ok(name) => name,
-        Err(e) => return Ok(HttpResponse::BadRequest().json(json!({"error": e}))),
-    };
-
-    match scheduler
-        .deploy(pool.get_ref(), &name, &image_name, internal_port, None)
-        .await
-    {
-        Ok(()) => Ok(HttpResponse::Ok().json(json!({"status": "success", "name": name}))),
-        Err(e) => Ok(HttpResponse::InternalServerError().json(json!({"error": e.to_string()}))),
+        let _ = fs::remove_dir_all(&extracted_folder).await;
+        return Ok(HttpResponse::InternalServerError().json(json!({"error": e.to_string()})));
     }
+
+    let pool_bg = pool.clone();
+    let scheduler_bg = scheduler.clone();
+    let name_bg = name.clone();
+    tokio::spawn(async move {
+        let image_name = match build_image(
+            extracted_folder.to_string_lossy().to_string(),
+            scheduler_bg.docker_host(),
+        )
+        .await
+        {
+            Ok(img) => img,
+            Err(e) => {
+                eprintln!("build: failed for {name_bg}: {e}");
+                let _ = fs::remove_dir_all(&extracted_folder).await;
+                let _ = Registry::update_status(&pool_bg, &name_bg, "failed").await;
+                return;
+            }
+        };
+
+        let _ = fs::remove_dir_all(&extracted_folder).await;
+
+        if let Err(e) = scheduler_bg
+            .deploy(pool_bg.get_ref(), &name_bg, &image_name, internal_port, None)
+            .await
+        {
+            eprintln!("deploy: failed for {name_bg}: {e}");
+            let _ = Registry::update_status(&pool_bg, &name_bg, "failed").await;
+        }
+    });
+
+    Ok(HttpResponse::Accepted().json(json!({"name": name})))
 }
 
 #[utoipa::path(
@@ -307,15 +330,8 @@ async fn deploy_app(
     pool: web::Data<PgPool>,
     body: web::Json<DeployBody>,
 ) -> HttpResponse {
-    let internal_port = match body.port {
-        Some(p) => p,
-        None => {
-            return HttpResponse::BadRequest()
-                .json(json!({"error": "port is required: specify the port your app listens on"}));
-        }
-    };
     match scheduler
-        .deploy(&pool, &body.name, &body.image, internal_port, body.base_domain.as_deref())
+        .deploy(&pool, &body.name, &body.image, body.port, body.base_domain.as_deref())
         .await
     {
         Ok(()) => HttpResponse::Ok().finish(),
@@ -503,15 +519,20 @@ async fn status_app(
     path: web::Path<String>,
 ) -> impl Responder {
     let app_name = path.into_inner();
-    match Registry::get(&pool, &app_name).await {
-        Ok(Some(_)) => {}
+    let app = match Registry::get(&pool, &app_name).await {
+        Ok(Some(app)) => app,
         Ok(None) => return HttpResponse::NotFound().finish(),
         Err(e) => {
             eprintln!("registry: get failed for {app_name}: {e}");
             return HttpResponse::InternalServerError().finish();
         }
-    }
-    let status = scheduler.inspect(&app_name).await;
+    };
+    let docker_status = scheduler.inspect(&app_name).await;
+    let status = if docker_status == "unknown" {
+        app.status.as_deref().unwrap_or("unknown").to_string()
+    } else {
+        docker_status
+    };
     HttpResponse::Ok().body(status)
 }
 

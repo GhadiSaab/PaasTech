@@ -307,15 +307,51 @@ pub async fn upload(source: &str) -> Result<(), String> {
 
     pb.finish_and_clear();
 
-    if resp.status().is_success() {
-        println!("{} Uploaded successfully", "✓".green());
-    } else {
+    if !resp.status().is_success() {
         let status = resp.status();
         let text = resp.text().await.unwrap_or_default();
         return Err(format!("Upload failed ({}): {}", status, text));
     }
 
-    Ok(())
+    let body: serde_json::Value = resp
+        .json()
+        .await
+        .map_err(|e| format!("Failed to parse response: {e}"))?;
+
+    let name = body["name"]
+        .as_str()
+        .ok_or("Server response missing 'name' field")?
+        .to_string();
+
+    println!("{} Upload accepted — app name: {}", "✓".green(), name.bold());
+
+    let pb = spinner("Building and deploying...");
+    loop {
+        tokio::time::sleep(Duration::from_secs(5)).await;
+
+        let status_resp = client
+            .get(format!("{}/app/{}/status", api_base(), name))
+            .send()
+            .await
+            .map_err(|e| format!("Status check failed: {e}"))?;
+
+        let status_text = status_resp.text().await.unwrap_or_default();
+
+        match status_text.as_str() {
+            "running" => {
+                pb.finish_and_clear();
+                println!("{} App {} is running", "✓".green(), name.bold());
+                return Ok(());
+            }
+            "failed" => {
+                pb.finish_and_clear();
+                return Err(format!("Build or deploy failed for {}", name));
+            }
+            other => {
+                pb.set_message(format!("Status: {other}..."));
+            }
+        }
+    }
 }
 
 // GET /app/{name}/logs — NOT implemented on server
