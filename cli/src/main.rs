@@ -121,9 +121,9 @@ enum ResourceCommands {
         /// Docker Hub version tag
         #[arg(long)]
         version: String,
-        /// Application name to link at creation
+        /// Application name to link at creation (repeatable)
         #[arg(long)]
-        link: Option<String>,
+        link: Vec<String>,
     },
     /// List all resources
     List,
@@ -144,17 +144,17 @@ enum ResourceCommands {
         /// New Docker Hub version tag
         #[arg(long)]
         version: Option<String>,
-        /// Application name to link
+        /// Application name to link (repeatable)
         #[arg(long)]
-        link: Option<String>,
+        link: Vec<String>,
     },
-    /// Attach a resource to an application
+    /// Attach a resource to one or more applications
     Attach {
         /// Resource name
         name: String,
-        /// Application name
+        /// Application name (repeatable)
         #[arg(long)]
-        app: String,
+        app: Vec<String>,
     },
     /// Start a stopped resource
     Start {
@@ -235,7 +235,10 @@ async fn main() {
                 r#type,
                 version,
                 link,
-            } => resources::create(&name, &r#type, &version, link.as_deref()).await,
+            } => {
+                let refs: Vec<&str> = link.iter().map(|s| s.as_str()).collect();
+                resources::create(&name, &r#type, &version, &refs).await
+            }
             ResourceCommands::List => resources::list().await,
             ResourceCommands::Info { name } => resources::info(&name).await,
             ResourceCommands::Delete { name } => resources::delete(&name).await,
@@ -243,8 +246,14 @@ async fn main() {
                 name,
                 version,
                 link,
-            } => resources::edit(&name, version.as_deref(), link.as_deref()).await,
-            ResourceCommands::Attach { name, app } => resources::attach(&name, &app).await,
+            } => {
+                let refs: Vec<&str> = link.iter().map(|s| s.as_str()).collect();
+                resources::edit(&name, version.as_deref(), &refs).await
+            }
+            ResourceCommands::Attach { name, app } => {
+                let refs: Vec<&str> = app.iter().map(|s| s.as_str()).collect();
+                resources::attach(&name, &refs).await
+            }
             ResourceCommands::Start { name } => resources::start(&name).await,
             ResourceCommands::Stop { name } => resources::stop(&name).await,
             ResourceCommands::Logs { name, tail } => resources::logs(&name, tail).await,

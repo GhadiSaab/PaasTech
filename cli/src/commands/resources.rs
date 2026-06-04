@@ -171,17 +171,18 @@ pub async fn create(
     display_name: &str,
     service_type: &str,
     version: &str,
-    link: Option<&str>,
+    links: &[&str],
 ) -> Result<(), String> {
-    let mut body = serde_json::json!({
+    let mut app_uuids = Vec::new();
+    for &app_name in links {
+        app_uuids.push(find_app(app_name).await?);
+    }
+
+    let body = serde_json::json!({
         "display_name": display_name,
         "name": service_type,
         "version": version,
     });
-    if let Some(app_name) = link {
-        let app_uuid = find_app(app_name).await?;
-        body["application_id"] = serde_json::Value::String(app_uuid);
-    }
 
     let pb = spinner(&format!("Creating resource {}...", display_name));
     let client = reqwest::Client::new();
@@ -191,20 +192,53 @@ pub async fn create(
         .send()
         .await
         .map_err(|e| format!("Request failed: {e}"))?;
-    pb.finish_and_clear();
 
-    match resp.status().as_u16() {
-        201 => println!("{} Resource {} created", "✓".green(), display_name.bold()),
+    #[derive(Deserialize)]
+    struct Created {
+        id: String,
+    }
+
+    let resource_id = match resp.status().as_u16() {
+        201 => {
+            resp.json::<Created>()
+                .await
+                .map_err(|e| format!("Failed to parse response: {e}"))?
+                .id
+        }
         400 => {
+            pb.finish_and_clear();
             let text = resp.text().await.unwrap_or_default();
             return Err(format!("Invalid request: {}", text));
         }
         code => {
+            pb.finish_and_clear();
             let text = resp.text().await.unwrap_or_default();
             return Err(format!("Server error ({}): {}", code, text));
         }
+    };
+
+    if !app_uuids.is_empty() {
+        let url = resource_url(&resource_id, None)?;
+        let link_body = serde_json::json!({ "application_ids": app_uuids });
+        let link_resp = client
+            .patch(url)
+            .json(&link_body)
+            .send()
+            .await
+            .map_err(|e| format!("Request failed: {e}"))?;
+        pb.finish_and_clear();
+        if !link_resp.status().is_success() {
+            let text = link_resp.text().await.unwrap_or_default();
+            return Err(format!(
+                "Resource created but failed to link apps: {}",
+                text
+            ));
+        }
+    } else {
+        pb.finish_and_clear();
     }
 
+    println!("{} Resource {} created", "✓".green(), display_name.bold());
     Ok(())
 }
 
@@ -290,11 +324,7 @@ pub async fn delete(display_name: &str) -> Result<(), String> {
 }
 
 // PATCH /resource/{id} — update version and/or linked apps
-pub async fn edit(
-    display_name: &str,
-    version: Option<&str>,
-    link: Option<&str>,
-) -> Result<(), String> {
+pub async fn edit(display_name: &str, version: Option<&str>, links: &[&str]) -> Result<(), String> {
     let pb = spinner(&format!("Updating {}...", display_name));
     let resource = find_resource(display_name).await?;
     let url = resource_url(&resource.id, None)?;
@@ -303,17 +333,15 @@ pub async fn edit(
     if let Some(v) = version {
         body["version"] = serde_json::Value::String(v.to_string());
     }
-    if let Some(app_name) = link {
-        let app_uuid = find_app(app_name).await?;
-        let mut ids: Vec<serde_json::Value> = resource
-            .application_ids
-            .iter()
-            .map(|id| serde_json::Value::String(id.clone()))
-            .collect();
-        if !ids.iter().any(|v| v.as_str() == Some(app_uuid.as_str())) {
-            ids.push(serde_json::Value::String(app_uuid));
+    if !links.is_empty() {
+        let mut ids: Vec<String> = resource.application_ids.clone();
+        for &app_name in links {
+            let uuid = find_app(app_name).await?;
+            if !ids.contains(&uuid) {
+                ids.push(uuid);
+            }
         }
-        body["application_ids"] = serde_json::Value::Array(ids);
+        body["application_ids"] = serde_json::json!(ids);
     }
 
     let client = reqwest::Client::new();
@@ -337,14 +365,25 @@ pub async fn edit(
     Ok(())
 }
 
-// PATCH /resource/{id} — link to an application
-pub async fn attach(display_name: &str, app: &str) -> Result<(), String> {
-    let app_name = find_app(app).await?;
-    let pb = spinner(&format!("Attaching {} to {}...", display_name, app_name));
+// PATCH /resource/{id} — link to one or more applications
+pub async fn attach(display_name: &str, apps: &[&str]) -> Result<(), String> {
+    let mut new_uuids = Vec::new();
+    for &app_name in apps {
+        new_uuids.push(find_app(app_name).await?);
+    }
+
+    let pb = spinner(&format!("Attaching {}...", display_name));
     let resource = find_resource(display_name).await?;
     let url = resource_url(&resource.id, None)?;
 
-    let body = serde_json::json!({ "application_ids": [app_name] });
+    let mut ids: Vec<String> = resource.application_ids.clone();
+    for uuid in &new_uuids {
+        if !ids.contains(uuid) {
+            ids.push(uuid.clone());
+        }
+    }
+
+    let body = serde_json::json!({ "application_ids": ids });
 
     let client = reqwest::Client::new();
     let resp = client
@@ -360,7 +399,7 @@ pub async fn attach(display_name: &str, app: &str) -> Result<(), String> {
             "{} Resource {} attached to {}",
             "✓".green(),
             display_name.bold(),
-            app
+            apps.join(", ")
         ),
         404 => return Err(format!("Resource '{}' not found", display_name)),
         code => return Err(format!("Server error: {}", code)),
