@@ -1,0 +1,45 @@
+
+release:
+  stage: deploy
+  image: registry.gitlab.com/gitlab-org/release-cli:latest
+  needs:
+    - job: cli-upload
+  script:
+    - echo "Creating release ${CI_COMMIT_TAG}"
+  release:
+    tag_name: "$CI_COMMIT_TAG"
+    name: "PaaSTech $CI_COMMIT_TAG"
+    description: |
+      ## PaaSTech $CI_COMMIT_TAG
+
+      ### CLI Installation
+
+      **Debian/Ubuntu**
+      ```
+      wget ${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/packages/generic/paastech-cli/${CI_COMMIT_TAG}/paastech-${CI_COMMIT_TAG}-amd64.deb
+      sudo dpkg -i paastech-${CI_COMMIT_TAG}-amd64.deb
+      ```
+
+      **Fedora/RHEL**
+      ```
+      wget ${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/packages/generic/paastech-cli/${CI_COMMIT_TAG}/paastech-${CI_COMMIT_TAG}-x86_64.rpm
+      sudo rpm -i paastech-${CI_COMMIT_TAG}-x86_64.rpm
+      ```
+
+      **Arch Linux** — download PKGBUILD and run `makepkg -si`
+    assets:
+      links:
+        - name: "paastech (Debian/Ubuntu .deb)"
+          url: "${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/packages/generic/paastech-cli/${CI_COMMIT_TAG}/paastech-${CI_COMMIT_TAG}-amd64.deb"
+          link_type: package
+        - name: "paastech (Fedora/RHEL .rpm)"
+          url: "${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/packages/generic/paastech-cli/${CI_COMMIT_TAG}/paastech-${CI_COMMIT_TAG}-x86_64.rpm"
+          link_type: package
+        - name: "PKGBUILD (Arch Linux)"
+          url: "${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/packages/generic/paastech-cli/${CI_COMMIT_TAG}/PKGBUILD"
+          link_type: other
+        - name: "paastech binary (x86_64 static)"
+          url: "${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/packages/generic/paastech-cli/${CI_COMMIT_TAG}/paastech-x86_64"
+          link_type: other
+  rules:
+    - if: $CI_COMMIT_TAG

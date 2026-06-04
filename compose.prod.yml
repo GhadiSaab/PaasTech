@@ -32,7 +32,8 @@ services:
       - paas-net
 
   api:
-    build: .
+    image: "${PAASTECH_IMAGE}"
+    pull_policy: always
     restart: unless-stopped
     ports:
       - "${PORT:-8080}:${PORT:-8080}"
@@ -40,7 +41,7 @@ services:
       PORT: "${PORT:-8080}"
       HOST: "0.0.0.0"
       DATABASE_URL: "postgresql://${POSTGRES_USER:-paastech}:${POSTGRES_PASSWORD:-paastech}@db:5432/${POSTGRES_DB:-paastech}"
-      BASE_DOMAIN: "${BASE_DOMAIN:-localhost}"
+      BASE_DOMAIN: "${BASE_DOMAIN}"
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
     depends_on:
@@ -49,6 +50,12 @@ services:
     networks:
       - internal
       - paas-net
+    healthcheck:
+      test: ["CMD-SHELL", "curl -so /dev/null http://localhost:${PORT:-8080}"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
 
 networks:
   internal:

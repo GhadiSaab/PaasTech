@@ -2,10 +2,25 @@
 name = "paastech"
 version = "0.1.0"
 edition = "2024"
+description = "PaaSTech CLI — deploy and manage your apps"
 
 [[bin]]
 name = "paastech"
 path = "src/main.rs"
+
+[package.metadata.deb]
+maintainer = "PaaSTech : best DO team"
+depends = ""
+section = "utils"
+priority = "optional"
+assets = [
+  ["target/x86_64-unknown-linux-musl/release/paastech", "/usr/bin/paastech", "755"],
+]
+
+[package.metadata.generate-rpm]
+assets = [
+  { source = "target/x86_64-unknown-linux-musl/release/paastech", dest = "/usr/bin/paastech", mode = "0755" },
+]
 
 [dependencies]
 clap = { version = "4", features = ["derive", "env"] }
