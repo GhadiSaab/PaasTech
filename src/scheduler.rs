@@ -177,30 +177,18 @@ impl Scheduler {
         &self,
         app_name: &str,
         image: &str,
-        internal_port: Option<u16>,
+        internal_port: u16,
         host_port: u16,
     ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
-        let (exposed_ports, host_config_body) = match internal_port {
-            Some(cp) => {
-                let port_key = format!("{}/tcp", cp);
-                let mut port_bindings: HashMap<String, Option<Vec<PortBinding>>> = HashMap::new();
-                port_bindings.insert(
-                    port_key.clone(),
-                    Some(vec![PortBinding {
-                        host_ip: Some("0.0.0.0".to_string()),
-                        host_port: Some(host_port.to_string()),
-                    }]),
-                );
-                (
-                    Some(vec![port_key]),
-                    Some(HostConfig {
-                        port_bindings: Some(port_bindings),
-                        ..Default::default()
-                    }),
-                )
-            }
-            None => (None, None),
-        };
+        let port_key = format!("{}/tcp", internal_port);
+        let mut port_bindings: HashMap<String, Option<Vec<PortBinding>>> = HashMap::new();
+        port_bindings.insert(
+            port_key.clone(),
+            Some(vec![PortBinding {
+                host_ip: Some("0.0.0.0".to_string()),
+                host_port: Some(host_port.to_string()),
+            }]),
+        );
 
         self.docker
             .create_container(
@@ -211,8 +199,11 @@ impl Scheduler {
                 ),
                 ContainerCreateBody {
                     image: Some(image.to_string()),
-                    exposed_ports,
-                    host_config: host_config_body,
+                    exposed_ports: Some(vec![port_key]),
+                    host_config: Some(HostConfig {
+                        port_bindings: Some(port_bindings),
+                        ..Default::default()
+                    }),
                     ..Default::default()
                 },
             )
@@ -334,13 +325,7 @@ impl Scheduler {
         Ok(())
     }
 
-    pub async fn deploy(
-        &self,
-        pool: &PgPool,
-        app_name: &str,
-        image: &str,
-        internal_port: Option<u16>,
-    ) {
+    pub async fn deploy(&self, pool: &PgPool, app_name: &str, image: &str, internal_port: u16) {
         self.pull(image).await;
 
         let host_port = match find_free_port() {
@@ -366,7 +351,7 @@ impl Scheduler {
             app_name,
             image,
             &container_id,
-            internal_port.map(|p| p as i32),
+            Some(internal_port as i32),
             host_port as i32,
             "running",
         )
@@ -381,7 +366,7 @@ impl Scheduler {
         pool: &PgPool,
         app_name: &str,
         image: &str,
-        internal_port: Option<u16>,
+        internal_port: u16,
         host_port: u16,
     ) {
         let _ = self

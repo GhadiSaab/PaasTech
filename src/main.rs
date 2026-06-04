@@ -211,7 +211,12 @@ async fn upload_app(
 
     let internal_port = fields
         .get("internal_port")
-        .and_then(|p| p.trim().parse::<u16>().ok());
+        .and_then(|p| p.trim().parse::<u16>().ok())
+        .ok_or_else(|| {
+            error::ErrorBadRequest(
+                "internal_port is required: specify the port your web app listens on (e.g. 8080)",
+            )
+        })?;
 
     let name = format!("paastech-{}", Uuid::new_v4());
 
@@ -281,8 +286,15 @@ async fn deploy_app(
     pool: web::Data<PgPool>,
     body: web::Json<DeployBody>,
 ) -> impl Responder {
+    let internal_port = match body.port {
+        Some(p) => p,
+        None => {
+            return HttpResponse::BadRequest()
+                .json(json!({"error": "port is required: specify the port your app listens on"}));
+        }
+    };
     scheduler
-        .deploy(&pool, &body.name, &body.image, body.port)
+        .deploy(&pool, &body.name, &body.image, internal_port)
         .await;
     HttpResponse::Ok().finish()
 }
@@ -357,7 +369,12 @@ async fn restart_app(
         }
     };
 
-    let internal_port = app.internal_port.map(|p| p as u16);
+    let internal_port = match app.internal_port {
+        Some(p) => p as u16,
+        None => {
+            return HttpResponse::BadRequest().json(json!({"error": "internal_port missing: cannot restart an app without a configured internal port"}));
+        }
+    };
     let host_port = match app.port {
         Some(p) => p as u16,
         None => match find_free_port() {
