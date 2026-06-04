@@ -15,7 +15,7 @@ use sqlx::PgPool;
 use std::collections::HashMap;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use crate::registry::Registry;
+use crate::registry::{App, Registry};
 
 #[derive(Debug)]
 pub enum DeployError {
@@ -210,16 +210,107 @@ impl Scheduler {
             .collect()
     }
 
-    pub async fn restart(&self, app_name: &str) {
-        if let Err(e) = self
-            .docker
+    pub async fn restart(&self, app_name: &str) -> Result<(), bollard::errors::Error> {
+        self.docker
             .restart_container(
                 app_name,
                 Some(RestartContainerOptionsBuilder::default().build()),
             )
             .await
+    }
+
+    async fn wait_until_running(&self, app_name: &str, timeout: Duration) -> bool {
+        let deadline = std::time::Instant::now() + timeout;
+        while std::time::Instant::now() < deadline {
+            if self.inspect(app_name).await == "running" {
+                return true;
+            }
+            sleep(Duration::from_millis(500)).await;
+        }
+
+        false
+    }
+
+    async fn mark_app_status(pool: &PgPool, app_name: &str, status: &str) {
+        if let Err(e) = Registry::update_status(pool, app_name, status).await {
+            eprintln!("watch: failed to update status for {app_name}: {e}");
+        }
+    }
+
+    async fn restart_exited_app(&self, pool: &PgPool, app_name: &str) {
+        println!("watch: app {app_name} crashed, restarting");
+        Self::mark_app_status(pool, app_name, "crashed").await;
+
+        match self.restart(app_name).await {
+            Ok(()) => {
+                if self
+                    .wait_until_running(app_name, Duration::from_secs(10))
+                    .await
+                {
+                    Self::mark_app_status(pool, app_name, "running").await;
+                } else {
+                    eprintln!("watch: app {app_name} did not reach running after restart");
+                }
+            }
+            Err(e) => {
+                eprintln!("watch: failed to restart {app_name}: {e}");
+            }
+        }
+    }
+
+    async fn recreate_missing_app(&self, pool: &PgPool, app: &App) {
+        println!("watch: app {} container is missing, recreating", app.name);
+        Self::mark_app_status(pool, &app.name, "crashed").await;
+
+        let image = match app.image_id.as_deref().filter(|image| !image.is_empty()) {
+            Some(image) => image,
+            None => {
+                eprintln!("watch: cannot recreate {} without an image_id", app.name);
+                return;
+            }
+        };
+        let internal_port = app.internal_port.map(|port| port as u16);
+        let host_port = match app.port {
+            Some(port) => port as u16,
+            None => match find_free_port() {
+                Ok(port) => port,
+                Err(e) => {
+                    eprintln!(
+                        "watch: failed to find port while recreating {}: {e}",
+                        app.name
+                    );
+                    return;
+                }
+            },
+        };
+
+        match self
+            .redeploy(
+                pool,
+                &app.name,
+                image,
+                internal_port,
+                host_port,
+                app.base_domain.as_deref(),
+            )
+            .await
         {
-            eprintln!("docker: failed to restart {app_name}: {e}");
+            Ok(()) => {
+                if self
+                    .wait_until_running(&app.name, Duration::from_secs(10))
+                    .await
+                {
+                    Self::mark_app_status(pool, &app.name, "running").await;
+                } else {
+                    eprintln!(
+                        "watch: app {} did not reach running after recreate",
+                        app.name
+                    );
+                }
+            }
+            Err(e) => {
+                eprintln!("watch: failed to recreate {}: {e}", app.name);
+            }
         }
     }
 
@@ -236,20 +327,18 @@ impl Scheduler {
             };
 
             for app in apps {
+                let should_be_running =
+                    matches!(app.status.as_deref(), Some("running") | Some("crashed"));
+                if !should_be_running {
+                    continue;
+                }
+
                 let status = self.inspect(&app.name).await;
 
-                if status == "exited" {
-                    println!("watch: app {} crashed, restarting", app.name);
-
-                    if let Err(e) = Registry::update_status(pool, &app.name, "crashed").await {
-                        eprintln!("watch: failed to update status for {}: {e}", app.name);
-                    }
-
-                    self.restart(&app.name).await;
-
-                    if let Err(e) = Registry::update_status(pool, &app.name, "running").await {
-                        eprintln!("watch: failed to update status for {}: {e}", app.name);
-                    }
+                match status.as_str() {
+                    "exited" => self.restart_exited_app(pool, &app.name).await,
+                    "unknown" => self.recreate_missing_app(pool, &app).await,
+                    _ => {}
                 }
             }
         }
