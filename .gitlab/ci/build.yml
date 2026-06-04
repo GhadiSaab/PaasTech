@@ -32,6 +32,14 @@ docker-build:
         .
   rules:
     - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+      changes:
+        - src/**/*
+        - Cargo.toml
+        - Cargo.lock
+        - database/**/*
+        - services/**/*
+        - .sqlx/**/*
+        - Dockerfile
 
 docker-tag:
   extends: .docker-base
