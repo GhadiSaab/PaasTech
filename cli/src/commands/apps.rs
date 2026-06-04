@@ -1,9 +1,8 @@
+use super::utils::{colored_status, spinner};
 use crate::api_base;
 use colored::Colorize;
-use indicatif::{ProgressBar, ProgressStyle};
 use serde::Deserialize;
 use serde_json::Value;
-use std::time::Duration;
 
 #[derive(Deserialize)]
 struct App {
@@ -14,15 +13,6 @@ struct App {
     #[allow(dead_code)]
     env: Option<Value>,
     created_at: Option<String>,
-}
-
-fn colored_status(status: &str) -> (String, usize) {
-    let plain = match status {
-        "running" => status.green().to_string(),
-        "stopped" | "error" => status.red().to_string(),
-        _ => status.yellow().to_string(),
-    };
-    (plain, status.len())
 }
 
 fn print_table(apps: &[App]) {
@@ -98,19 +88,6 @@ fn print_table(apps: &[App]) {
     println!("{}", sep);
 }
 
-fn spinner(msg: &str) -> ProgressBar {
-    let pb = ProgressBar::new_spinner();
-    pb.set_style(
-        ProgressStyle::default_spinner()
-            .tick_strings(&["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"])
-            .template("{spinner:.cyan} {msg}")
-            .unwrap(),
-    );
-    pb.set_message(msg.to_string());
-    pb.enable_steady_tick(Duration::from_millis(80));
-    pb
-}
-
 // POST /app/deploy — exists
 pub async fn deploy(name: &str, image: &str, port: u16) -> Result<(), String> {
     let pb = spinner(&format!("Deploying {} ({})", name, image));
@@ -177,12 +154,14 @@ fn app_url(name: &str, action: &str) -> Result<reqwest::Url, String> {
 // POST /app/{name}/stop — exists
 pub async fn stop(name: &str) -> Result<(), String> {
     let url = app_url(name, "stop")?;
+    let pb = spinner(&format!("Stopping {}...", name));
     let client = reqwest::Client::new();
     let resp = client
         .post(url)
         .send()
         .await
         .map_err(|e| format!("Request failed: {e}"))?;
+    pb.finish_and_clear();
 
     match resp.status().as_u16() {
         200 => println!("{} App {} stopped", "✓".green(), name.bold()),
@@ -196,12 +175,14 @@ pub async fn stop(name: &str) -> Result<(), String> {
 // POST /app/{name}/restart — exists
 pub async fn restart(name: &str) -> Result<(), String> {
     let url = app_url(name, "restart")?;
+    let pb = spinner(&format!("Restarting {}...", name));
     let client = reqwest::Client::new();
     let resp = client
         .post(url)
         .send()
         .await
         .map_err(|e| format!("Request failed: {e}"))?;
+    pb.finish_and_clear();
 
     match resp.status().as_u16() {
         200 => println!("{} App {} restarted", "✓".green(), name.bold()),
@@ -215,12 +196,14 @@ pub async fn restart(name: &str) -> Result<(), String> {
 // DELETE /app/{name}
 pub async fn delete(name: &str) -> Result<(), String> {
     let url = app_url(name, "delete")?;
+    let pb = spinner(&format!("Deleting {}...", name));
     let client = reqwest::Client::new();
     let resp = client
         .delete(url)
         .send()
         .await
         .map_err(|e| format!("Request failed: {e}"))?;
+    pb.finish_and_clear();
 
     match resp.status().as_u16() {
         204 => println!("App {} succesfully deleted", name.bold()),
@@ -369,6 +352,7 @@ pub async fn env_set(name: &str, pair: &str) -> Result<(), String> {
         .ok_or_else(|| "Invalid format: expected KEY=VALUE".to_string())?;
 
     let url = app_url(name, "env")?;
+    let pb = spinner(&format!("Setting env for {}...", name));
     let client = reqwest::Client::new();
     let body = serde_json::json!({ "key": key, "value": value });
 
@@ -378,6 +362,7 @@ pub async fn env_set(name: &str, pair: &str) -> Result<(), String> {
         .send()
         .await
         .map_err(|e| format!("Request failed: {e}"))?;
+    pb.finish_and_clear();
 
     match resp.status().as_u16() {
         200 | 201 | 204 => println!("{} {}={}", "✓".green(), key.bold(), value),

@@ -25,9 +25,9 @@ enum Commands {
         command: AppCommands,
     },
     /// Manage resources (postgres, redis, s3)
-    Service {
+    Resource {
         #[command(subcommand)]
-        command: ServiceCommands,
+        command: ResourceCommands,
     },
     /// Generate shell completion script
     Completion {
@@ -110,33 +110,94 @@ enum EnvCommands {
 }
 
 #[derive(Subcommand)]
-enum ServiceCommands {
-    /// Create a managed service
+enum ResourceCommands {
+    /// Create a managed resource
     Create {
-        /// Service name
+        /// Resource display name
         name: String,
-        /// Service type
+        /// Resource type
         #[arg(long, value_parser = ["postgres", "redis", "s3"])]
         r#type: String,
+        /// Docker Hub version tag
+        #[arg(long)]
+        version: String,
+        /// Application UUID to link at creation
+        #[arg(long)]
+        link: Option<String>,
     },
     /// List all resources
     List,
-    /// Delete a service
-    Delete {
-        /// Service name
+    /// Show info about a resource
+    Info {
+        /// Resource name
         name: String,
     },
-    /// Attach a service to an application
-    Attach {
-        /// Service name
+    /// Delete a resource
+    Delete {
+        /// Resource name
         name: String,
-        /// Application to attach to
+    },
+    /// Update a resource's version or linked application
+    Edit {
+        /// Resource name
+        name: String,
+        /// New Docker Hub version tag
+        #[arg(long)]
+        version: Option<String>,
+        /// Application UUID to link
+        #[arg(long)]
+        link: Option<String>,
+    },
+    /// Attach a resource to an application
+    Attach {
+        /// Resource name
+        name: String,
+        /// Application UUID
         #[arg(long)]
         app: String,
     },
-    /// Show info about a service
-    Info {
-        /// Service name
+    /// Start a stopped resource
+    Start {
+        /// Resource name
+        name: String,
+    },
+    /// Stop a running resource
+    Stop {
+        /// Resource name
+        name: String,
+    },
+    /// Show logs for a resource
+    Logs {
+        /// Resource name
+        name: String,
+        /// Number of lines to show from the end
+        #[arg(long)]
+        tail: Option<u32>,
+    },
+    /// List available versions for a service type (e.g. postgres, redis, s3)
+    Versions {
+        /// Service type name
+        name: String,
+    },
+    /// Manage environment variables
+    Env {
+        #[command(subcommand)]
+        command: ResourceEnvCommands,
+    },
+}
+
+#[derive(Subcommand)]
+enum ResourceEnvCommands {
+    /// Set an environment variable (format: KEY=VALUE)
+    Set {
+        /// Resource name
+        name: String,
+        /// Key=Value pair
+        pair: String,
+    },
+    /// List environment variables for a resource
+    List {
+        /// Resource name
         name: String,
     },
 }
@@ -168,12 +229,30 @@ async fn main() {
                 EnvCommands::List { name } => apps::env_list(&name).await,
             },
         },
-        Commands::Service { command } => match command {
-            ServiceCommands::Create { name, r#type } => resources::create(&name, &r#type).await,
-            ServiceCommands::List => resources::list().await,
-            ServiceCommands::Delete { name } => resources::delete(&name).await,
-            ServiceCommands::Attach { name, app } => resources::attach(&name, &app).await,
-            ServiceCommands::Info { name } => resources::info(&name).await,
+        Commands::Resource { command } => match command {
+            ResourceCommands::Create {
+                name,
+                r#type,
+                version,
+                link,
+            } => resources::create(&name, &r#type, &version, link.as_deref()).await,
+            ResourceCommands::List => resources::list().await,
+            ResourceCommands::Info { name } => resources::info(&name).await,
+            ResourceCommands::Delete { name } => resources::delete(&name).await,
+            ResourceCommands::Edit {
+                name,
+                version,
+                link,
+            } => resources::edit(&name, version.as_deref(), link.as_deref()).await,
+            ResourceCommands::Attach { name, app } => resources::attach(&name, &app).await,
+            ResourceCommands::Start { name } => resources::start(&name).await,
+            ResourceCommands::Stop { name } => resources::stop(&name).await,
+            ResourceCommands::Logs { name, tail } => resources::logs(&name, tail).await,
+            ResourceCommands::Versions { name } => resources::versions(&name).await,
+            ResourceCommands::Env { command } => match command {
+                ResourceEnvCommands::Set { name, pair } => resources::env_set(&name, &pair).await,
+                ResourceEnvCommands::List { name } => resources::env_list(&name).await,
+            },
         },
     };
 
