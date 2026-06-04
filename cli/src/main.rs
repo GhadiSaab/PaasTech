@@ -2,7 +2,7 @@ mod commands;
 
 use clap::{CommandFactory, Parser, Subcommand};
 use clap_complete::{Shell, generate};
-use commands::{apps, services};
+use commands::{apps, resources};
 use std::io;
 
 #[derive(Parser)]
@@ -24,7 +24,7 @@ enum Commands {
         #[command(subcommand)]
         command: AppCommands,
     },
-    /// Manage services (postgres, redis, s3)
+    /// Manage resources (postgres, redis, s3)
     Service {
         #[command(subcommand)]
         command: ServiceCommands,
@@ -116,7 +116,7 @@ enum ServiceCommands {
         #[arg(long, value_parser = ["postgres", "redis", "s3"])]
         r#type: String,
     },
-    /// List all services
+    /// List all resources
     List,
     /// Delete a service
     Delete {
@@ -166,11 +166,11 @@ async fn main() {
             },
         },
         Commands::Service { command } => match command {
-            ServiceCommands::Create { name, r#type } => services::create(&name, &r#type).await,
-            ServiceCommands::List => services::list().await,
-            ServiceCommands::Delete { name } => services::delete(&name).await,
-            ServiceCommands::Attach { name, app } => services::attach(&name, &app).await,
-            ServiceCommands::Info { name } => services::info(&name).await,
+            ServiceCommands::Create { name, r#type } => resources::create(&name, &r#type).await,
+            ServiceCommands::List => resources::list().await,
+            ServiceCommands::Delete { name } => resources::delete(&name).await,
+            ServiceCommands::Attach { name, app } => resources::attach(&name, &app).await,
+            ServiceCommands::Info { name } => resources::info(&name).await,
         },
     };
 

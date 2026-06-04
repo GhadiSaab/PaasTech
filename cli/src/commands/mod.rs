@@ -1,2 +1,2 @@
 pub mod apps;
-pub mod services;
+pub mod resources;

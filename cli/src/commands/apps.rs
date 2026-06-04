@@ -3,7 +3,6 @@ use colored::Colorize;
 use indicatif::{ProgressBar, ProgressStyle};
 use serde::Deserialize;
 use serde_json::Value;
-use std::io::{self, Write};
 use std::time::Duration;
 
 #[derive(Deserialize)]
@@ -113,67 +112,34 @@ fn spinner(msg: &str) -> ProgressBar {
 }
 
 // POST /app/deploy — exists
-<<<<<<< HEAD
-fn prompt_for_port() -> Result<u16, String> {
-    loop {
-        print!("Internal application port: ");
-        io::stdout()
-            .flush()
-            .map_err(|e| format!("Failed to write prompt: {e}"))?;
-||||||| parent of 8a710c9 (fix(cli): restrict port to valid range with u16 and value_parser)
-pub async fn deploy(name: &str, image: &str, port: i32) -> Result<(), String> {
-    let pb = spinner(&format!("Deploying {} ({})", name, image));
-=======
 pub async fn deploy(name: &str, image: &str, port: u16) -> Result<(), String> {
     let pb = spinner(&format!("Deploying {} ({})", name, image));
->>>>>>> 8a710c9 (fix(cli): restrict port to valid range with u16 and value_parser)
 
-        let mut input = String::new();
-        io::stdin()
-            .read_line(&mut input)
-            .map_err(|e| format!("Failed to read port: {e}"))?;
-
-        match input.trim().parse::<u16>() {
-            Ok(port) if port > 0 => return Ok(port),
-            _ => eprintln!("Enter a port between 1 and 65535."),
-        }
-    }
-}
-
-pub async fn deploy(name: &str, image: &str, mut port: Option<u16>) -> Result<(), String> {
     let client = reqwest::Client::new();
-    loop {
-        let pb = spinner(&format!("Deploying {} ({})", name, image));
-        let body = serde_json::json!({
-            "name": name,
-            "image": image,
-            "port": port
-        });
+    let body = serde_json::json!({
+        "name": name,
+        "image": image,
+        "port": port
+    });
 
-        let resp = client
-            .post(format!("{}/app/deploy", api_base()))
-            .json(&body)
-            .send()
-            .await
-            .map_err(|e| format!("Request failed: {e}"))?;
+    let resp = client
+        .post(format!("{}/app/deploy", api_base()))
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| format!("Request failed: {e}"))?;
 
-        pb.finish_and_clear();
+    pb.finish_and_clear();
 
-        if resp.status().is_success() {
-            println!("{} App {} deployed", "✓".green(), name.bold());
-            return Ok(());
-        }
-
+    if resp.status().is_success() {
+        println!("{} App {} deployed", "✓".green(), name.bold());
+    } else {
         let status = resp.status();
         let text = resp.text().await.unwrap_or_default();
-        if status == reqwest::StatusCode::UNPROCESSABLE_ENTITY && port.is_none() {
-            eprintln!("{text}");
-            port = Some(prompt_for_port()?);
-            continue;
-        }
-
         return Err(format!("Deploy failed ({}): {}", status, text));
     }
+
+    Ok(())
 }
 
 // GET /app — exists
