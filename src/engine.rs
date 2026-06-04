@@ -67,21 +67,14 @@ pub async fn extract_zip(source: PathBuf) -> Result<PathBuf, String> {
     .map(|_| dest_path)
 }
 
-pub async fn build_image(from: PathBuf, docker_host: &str) -> Result<String, String> {
+pub async fn build_image(from: String, docker_host: &str) -> Result<String, String> {
     let image_name = format!("paastech-{}", Uuid::new_v4());
 
     let builder =
         std::env::var("BUILDER").expect("BUILDER env var must be set. check .env.example");
 
     let mut cmd = TokioCommand::new("pack");
-    cmd.args([
-        "build",
-        &image_name,
-        "--path",
-        &from.to_string_lossy(),
-        "--builder",
-        &builder,
-    ]);
+    cmd.args(["build", &image_name, "--path", &from, "--builder", &builder]);
 
     if !docker_host.is_empty() {
         cmd.args(["--docker-host", docker_host]);

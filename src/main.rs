@@ -226,7 +226,12 @@ async fn upload_app(
         .await
         .map_err(error::ErrorInternalServerError)?;
 
-    let image_name = match build_image(extracted_folder.clone(), scheduler.docker_host()).await {
+    let image_name = match build_image(
+        extracted_folder.to_string_lossy().to_string(),
+        scheduler.docker_host(),
+    )
+    .await
+    {
         Ok(name) => name,
         Err(e) => return Ok(HttpResponse::BadRequest().json(json!({"error": e}))),
     };
