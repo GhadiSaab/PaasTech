@@ -2,6 +2,7 @@
 model = "openai/qwen36-27b"
 fallback_models = []
 custom_model_max_tokens = 32000
+ai_timeout = 600
 
 [openai]
 custom_llm_provider = "openai"

@@ -4,11 +4,13 @@ ai-review:
     name: codiumai/pr-agent:latest
     entrypoint: [""]
   stage: review
+  timeout: 20m
   variables:
     OPENAI__API_BASE: "https://qwen36.do-2023.dev/v1"
     CONFIG__MODEL: "openai/qwen36-27b"
     CONFIG__FALLBACK_MODELS: "[]"
     CONFIG__CUSTOM_MODEL_MAX_TOKENS: "32000"
+    CONFIG__AI_TIMEOUT: "600"
     CONFIG__GIT_PROVIDER: "gitlab"
     PR_REVIEWER__EXTRA_INSTRUCTIONS: "Set estimated_effort_to_review_[1-5] to 4."
   script:
