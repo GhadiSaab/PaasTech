@@ -1,7 +1,6 @@
 stages:
   - validate
   - test
-  - review
   - publish
   - package
   - deploy
@@ -24,7 +23,6 @@ variables:
 include:
   - .gitlab/ci/lint.yml
   - .gitlab/ci/test.yml
-  - .gitlab/ci/review.yml
   - .gitlab/ci/security.yml
   - .gitlab/ci/build.yml
   - .gitlab/ci/package.yml
