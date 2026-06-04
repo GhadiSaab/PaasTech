@@ -1,2 +1,0 @@
-# AI code review is handled by the PR-Agent server at http://162.38.112.133
-# Triggered via GitLab webhooks (merge request events + comments).
