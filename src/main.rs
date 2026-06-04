@@ -4,8 +4,6 @@ mod models;
 mod registry;
 mod scheduler;
 
-use crate::engine::{MultipartData, extract_zip, launch_code, save_multipart_file};
-use crate::scheduler::find_free_port;
 use actix_multipart::Multipart;
 use actix_web::{
     App, Error, HttpResponse, HttpServer, Responder, delete, error, get, patch, post, put, web,
@@ -15,17 +13,20 @@ use docker::{
     docker_image_for_service, fetch_service_versions, is_valid_service, prepare_config_for_service,
     service_port_for_service, valid_services, validate_docker_tag,
 };
-use models::{CreateResourcePayload, Resource, UpdateResourcePayload};
-use registry::Registry;
 use reqwest::Client;
-use scheduler::{DeployError, Scheduler};
 use serde::Deserialize;
+use serde_json::json;
 use sqlx::PgPool;
 use std::collections::HashMap;
 use tokio::fs;
 use utoipa::OpenApi;
 use utoipa_swagger_ui::SwaggerUi;
 use uuid::Uuid;
+
+use crate::engine::{MultipartData, build_image, extract_zip, save_multipart_file};
+use crate::models::{CreateResourcePayload, Resource, UpdateResourcePayload};
+use crate::registry::Registry;
+use crate::scheduler::{DeployError, Scheduler, find_free_port};
 
 struct Config {
     host: String,
@@ -206,7 +207,11 @@ async fn get_service_versions(
     tag = "apps"
 )]
 #[post("/app/upload")]
-async fn upload_app(pool: web::Data<PgPool>, payload: Multipart) -> Result<impl Responder, Error> {
+async fn upload_app(
+    pool: web::Data<PgPool>,
+    scheduler: web::Data<Scheduler>,
+    payload: Multipart,
+) -> Result<impl Responder, Error> {
     let MultipartData { file_path, fields } = save_multipart_file(payload).await?;
 
     let zip_filepath = match file_path {
@@ -216,17 +221,14 @@ async fn upload_app(pool: web::Data<PgPool>, payload: Multipart) -> Result<impl 
 
     let internal_port = fields
         .get("internal_port")
-        .and_then(|p| p.trim().parse::<u16>().ok());
+        .and_then(|p| p.trim().parse::<u16>().ok())
+        .ok_or_else(|| {
+            error::ErrorBadRequest(
+                "internal_port is required: specify the port your web app listens on",
+            )
+        })?;
 
-    let name = fields.get("name").cloned().unwrap_or_else(|| {
-        zip_filepath
-            .file_stem()
-            .map(|s| s.to_string_lossy().to_string())
-            .unwrap_or_else(|| "app".to_string())
-    });
-
-    let host_port = find_free_port()
-        .map_err(|e| error::ErrorInternalServerError(format!("Failed to find free port: {e}")))?;
+    let name = format!("paastech-{}", Uuid::new_v4());
 
     println!("Zip file uploaded to {:?}", zip_filepath);
 
@@ -234,23 +236,23 @@ async fn upload_app(pool: web::Data<PgPool>, payload: Multipart) -> Result<impl 
         .await
         .map_err(error::ErrorInternalServerError)?;
 
-    println!("Extraction worked");
-
-    launch_code(extracted_folder).await;
-
-    Registry::save(
-        &pool,
-        &name,
-        "",
-        "",
-        internal_port.map(|p| p as i32),
-        host_port as i32,
-        "running",
+    let image_name = match build_image(
+        extracted_folder.to_string_lossy().to_string(),
+        scheduler.docker_host(),
     )
     .await
-    .map_err(error::ErrorInternalServerError)?;
+    {
+        Ok(name) => name,
+        Err(e) => return Ok(HttpResponse::BadRequest().json(json!({"error": e}))),
+    };
 
-    Ok(HttpResponse::Ok().body("worked\n"))
+    match scheduler
+        .deploy(pool.get_ref(), &name, &image_name, internal_port)
+        .await
+    {
+        Ok(()) => Ok(HttpResponse::Ok().json(json!({"status": "success", "name": name}))),
+        Err(e) => Ok(HttpResponse::InternalServerError().json(json!({"error": e.to_string()}))),
+    }
 }
 
 #[utoipa::path(
@@ -297,8 +299,15 @@ async fn deploy_app(
     pool: web::Data<PgPool>,
     body: web::Json<DeployBody>,
 ) -> HttpResponse {
+    let internal_port = match body.port {
+        Some(p) => p,
+        None => {
+            return HttpResponse::BadRequest()
+                .json(json!({"error": "port is required: specify the port your app listens on"}));
+        }
+    };
     match scheduler
-        .deploy(&pool, &body.name, &body.image, body.port)
+        .deploy(&pool, &body.name, &body.image, internal_port)
         .await
     {
         Ok(()) => HttpResponse::Ok().finish(),
@@ -382,7 +391,12 @@ async fn restart_app(
         }
     };
 
-    let internal_port = app.internal_port.map(|p| p as u16);
+    let internal_port = match app.internal_port {
+        Some(p) => p as u16,
+        None => {
+            return HttpResponse::BadRequest().json(json!({"error": "internal_port missing: cannot restart an app without a configured internal port"}));
+        }
+    };
     let host_port = match app.port {
         Some(p) => p as u16,
         None => match find_free_port() {

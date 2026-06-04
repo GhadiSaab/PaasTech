@@ -3,9 +3,10 @@ use actix_web::{Error, web};
 use futures_util::TryStreamExt;
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::process::Command;
 use tokio::fs::File;
 use tokio::io::AsyncWriteExt;
+use tokio::process::Command as TokioCommand;
+use uuid::Uuid;
 
 pub struct MultipartData {
     pub file_path: Option<PathBuf>,
@@ -66,24 +67,32 @@ pub async fn extract_zip(source: PathBuf) -> Result<PathBuf, String> {
     .map(|_| dest_path)
 }
 
-pub async fn launch_code(from: PathBuf) {
-    println!("trying to launch code from {:?}", from);
+pub async fn build_image(from: String, docker_host: &str) -> Result<String, String> {
+    let image_name = format!("paastech-{}", Uuid::new_v4());
 
-    let app_py = from.join("app.py");
+    let builder =
+        std::env::var("BUILDER").expect("BUILDER env var must be set. check .env.example");
 
-    if !app_py.exists() {
-        println!("no such {:?}.....", app_py);
-        return;
+    let mut cmd = TokioCommand::new("pack");
+    cmd.args(["build", &image_name, "--path", &from, "--builder", &builder]);
+
+    if !docker_host.is_empty() {
+        cmd.args(["--docker-host", docker_host]);
     }
 
-    println!("> app found");
+    let output = cmd
+        .output()
+        .await
+        .map_err(|e| format!("Failed to run pack build: {}", e))?;
 
-    match Command::new("python3").arg(app_py).status() {
-        Ok(code) => {
-            println!("app did run, code is {}", code)
-        }
-        Err(e) => {
-            eprintln!("app couldn't run........ {}", e)
-        }
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        return Err(format!(
+            "Build failed with exit code {}:\n--- stderr ---\n{}\n--- stdout ---\n{}",
+            output.status, stderr, stdout
+        ));
     }
+
+    Ok(image_name)
 }
