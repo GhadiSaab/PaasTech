@@ -236,9 +236,12 @@ async fn upload_app(
         Err(e) => return Ok(HttpResponse::BadRequest().json(json!({"error": e}))),
     };
 
-    scheduler
+    if let Err(e) = scheduler
         .deploy(pool.get_ref(), &name, &image_name, internal_port)
-        .await;
+        .await
+    {
+        return Ok(HttpResponse::InternalServerError().json(json!({"error": e})));
+    }
 
     Ok(HttpResponse::Ok().json(json!({"status": "success", "name": name})))
 }
@@ -293,9 +296,12 @@ async fn deploy_app(
                 .json(json!({"error": "port is required: specify the port your app listens on"}));
         }
     };
-    scheduler
+    if let Err(e) = scheduler
         .deploy(&pool, &body.name, &body.image, internal_port)
-        .await;
+        .await
+    {
+        return HttpResponse::InternalServerError().json(json!({"error": e}));
+    }
     HttpResponse::Ok().finish()
 }
 
@@ -386,9 +392,12 @@ async fn restart_app(
         },
     };
 
-    scheduler
+    if let Err(e) = scheduler
         .redeploy(&pool, &app_name, &image, internal_port, host_port)
-        .await;
+        .await
+    {
+        return HttpResponse::InternalServerError().json(json!({"error": e}));
+    }
     HttpResponse::Ok().finish()
 }
 

@@ -325,28 +325,23 @@ impl Scheduler {
         Ok(())
     }
 
-    pub async fn deploy(&self, pool: &PgPool, app_name: &str, image: &str, internal_port: u16) {
+    pub async fn deploy(
+        &self,
+        pool: &PgPool,
+        app_name: &str,
+        image: &str,
+        internal_port: u16,
+    ) -> Result<(), String> {
         self.pull(image).await;
 
-        let host_port = match find_free_port() {
-            Ok(p) => p,
-            Err(e) => {
-                eprintln!("docker: failed to find free port for {app_name}: {e}");
-                return;
-            }
-        };
+        let host_port = find_free_port().map_err(|e| format!("failed to find free port: {e}"))?;
 
-        let container_id = match self
+        let container_id = self
             .create_and_start(app_name, image, internal_port, host_port)
             .await
-        {
-            Ok(id) => id,
-            Err(e) => {
-                eprintln!("docker: failed to create/start {app_name}: {e}");
-                return;
-            }
-        };
-        if let Err(e) = Registry::save(
+            .map_err(|e| format!("failed to create/start container: {e}"))?;
+
+        Registry::save(
             pool,
             app_name,
             image,
@@ -356,9 +351,9 @@ impl Scheduler {
             "running",
         )
         .await
-        {
-            eprintln!("registry: failed to save app {app_name}: {e}");
-        }
+        .map_err(|e| format!("failed to save app in registry: {e}"))?;
+
+        Ok(())
     }
 
     pub async fn redeploy(
@@ -368,7 +363,7 @@ impl Scheduler {
         image: &str,
         internal_port: u16,
         host_port: u16,
-    ) {
+    ) -> Result<(), String> {
         let _ = self
             .docker
             .stop_container(
@@ -386,23 +381,19 @@ impl Scheduler {
 
         self.pull(image).await;
 
-        let container_id = match self
+        let container_id = self
             .create_and_start(app_name, image, internal_port, host_port)
             .await
-        {
-            Ok(id) => id,
-            Err(e) => {
-                eprintln!("docker: failed to recreate {app_name}: {e}");
-                return;
-            }
-        };
+            .map_err(|e| format!("failed to recreate container: {e}"))?;
 
-        if let Err(e) = Registry::update_container_id(pool, app_name, &container_id).await {
-            eprintln!("registry: failed to update container_id for {app_name}: {e}");
-        }
+        Registry::update_container_id(pool, app_name, &container_id)
+            .await
+            .map_err(|e| format!("failed to update container_id: {e}"))?;
 
-        if let Err(e) = Registry::update_status(pool, app_name, "running").await {
-            eprintln!("registry: failed to update status for {app_name}: {e}");
-        }
+        Registry::update_status(pool, app_name, "running")
+            .await
+            .map_err(|e| format!("failed to update status: {e}"))?;
+
+        Ok(())
     }
 }
