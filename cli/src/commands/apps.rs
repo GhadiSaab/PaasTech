@@ -212,7 +212,7 @@ pub async fn restart(name: &str) -> Result<(), String> {
     Ok(())
 }
 
-// DELETE /app/{name} — NOT implemented on server
+// DELETE /app/{name}
 pub async fn delete(name: &str) -> Result<(), String> {
     let url = app_url(name, "delete")?;
     let client = reqwest::Client::new();
@@ -223,7 +223,7 @@ pub async fn delete(name: &str) -> Result<(), String> {
         .map_err(|e| format!("Request failed: {e}"))?;
 
     match resp.status().as_u16() {
-        200 => println!("{} App {} restarted", "✓".green(), name.bold()),
+        204 => println!("App {} succesfully deleted", name.bold()),
         404 => return Err(format!("App '{}' not found", name)),
         code => return Err(format!("Server error: {}", code)),
     }
@@ -231,7 +231,7 @@ pub async fn delete(name: &str) -> Result<(), String> {
     Ok(())
 }
 
-// GET /app/{name} — NOT implemented on server (only GET /app/{name}/status exists)
+// GET /app/{name}
 pub async fn info(name: &str) -> Result<(), String> {
     // Status exists: GET /app/{name}/status
     let url = app_url(name, "status")?;
@@ -339,26 +339,86 @@ pub async fn upload(source: &str) -> Result<(), String> {
     }
 }
 
-// GET /app/{name}/logs — NOT implemented on server
-pub async fn logs(name: &str) -> Result<(), String> {
-    // TODO: route GET /app/{name}/logs not yet implemented on server
-    println!("{}", "This command is not yet available".yellow());
-    let _ = name;
+// GET /app/{name}/logs
+pub async fn logs(name: &str, tail: Option<u32>) -> Result<(), String> {
+    let mut url = app_url(name, "logs")?;
+    if let Some(n) = tail {
+        url.query_pairs_mut().append_pair("tail", &n.to_string());
+    }
+
+    let resp = reqwest::get(url)
+        .await
+        .map_err(|e| format!("Request failed: {e}"))?;
+
+    match resp.status().as_u16() {
+        200 => {
+            let text = resp.text().await.unwrap_or_default();
+            print!("{}", text);
+        }
+        404 => return Err(format!("App '{}' not found", name)),
+        code => return Err(format!("Server error: {}", code)),
+    }
+
     Ok(())
 }
 
-// POST /app/{name}/env — NOT implemented on server
+// POST /app/{name}/env
 pub async fn env_set(name: &str, pair: &str) -> Result<(), String> {
-    // TODO: route POST /app/{name}/env not yet implemented on server
-    println!("{}", "This command is not yet available".yellow());
-    let _ = (name, pair);
+    let (key, value) = pair
+        .split_once('=')
+        .ok_or_else(|| "Invalid format: expected KEY=VALUE".to_string())?;
+
+    let url = app_url(name, "env")?;
+    let client = reqwest::Client::new();
+    let body = serde_json::json!({ "key": key, "value": value });
+
+    let resp = client
+        .post(url)
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| format!("Request failed: {e}"))?;
+
+    match resp.status().as_u16() {
+        200 | 201 | 204 => println!("{} {}={}", "✓".green(), key.bold(), value),
+        404 => return Err(format!("App '{}' not found", name)),
+        code => {
+            let text = resp.text().await.unwrap_or_default();
+            return Err(format!("Server error ({}): {}", code, text));
+        }
+    }
+
     Ok(())
 }
 
-// GET /app/{name}/env — NOT implemented on server
+// GET /app/{name}/env
 pub async fn env_list(name: &str) -> Result<(), String> {
-    // TODO: route GET /app/{name}/env not yet implemented on server
-    println!("{}", "This command is not yet available".yellow());
-    let _ = name;
+    let url = app_url(name, "env")?;
+    let resp = reqwest::get(url)
+        .await
+        .map_err(|e| format!("Request failed: {e}"))?;
+
+    match resp.status().as_u16() {
+        200 => {
+            let vars: serde_json::Map<String, Value> = resp
+                .json()
+                .await
+                .map_err(|e| format!("Failed to parse response: {e}"))?;
+            if vars.is_empty() {
+                println!("No environment variables set.");
+            } else {
+                for (key, val) in &vars {
+                    let v = val
+                        .as_str()
+                        .map(|s| s.to_string())
+                        .unwrap_or_else(|| val.to_string());
+                    println!("{}={}", key.bold(), v);
+                }
+            }
+        }
+        404 => return Err(format!("App '{}' not found", name)),
+        code => return Err(format!("Server error: {}", code)),
+    }
+
     Ok(())
 }

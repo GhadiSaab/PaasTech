@@ -82,6 +82,9 @@ enum AppCommands {
     Logs {
         /// Application name
         name: String,
+        /// Number of lines to show from the end
+        #[arg(long)]
+        tail: Option<u32>,
     },
     /// Manage environment variables
     Env {
@@ -159,7 +162,7 @@ async fn main() {
             AppCommands::Stop { name } => apps::stop(&name).await,
             AppCommands::Restart { name } => apps::restart(&name).await,
             AppCommands::Upload { source } => apps::upload(&source).await,
-            AppCommands::Logs { name } => apps::logs(&name).await,
+            AppCommands::Logs { name, tail } => apps::logs(&name, tail).await,
             AppCommands::Env { command } => match command {
                 EnvCommands::Set { name, pair } => apps::env_set(&name, &pair).await,
                 EnvCommands::List { name } => apps::env_list(&name).await,
