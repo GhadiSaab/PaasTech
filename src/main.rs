@@ -213,12 +213,7 @@ async fn upload_app(
         .get("internal_port")
         .and_then(|p| p.trim().parse::<u16>().ok());
 
-    let name = fields.get("name").cloned().unwrap_or_else(|| {
-        zip_filepath
-            .file_stem()
-            .map(|s| s.to_string_lossy().to_string())
-            .unwrap_or_else(|| "app".to_string())
-    });
+    let name = format!("paastech-{}", Uuid::new_v4());
 
     println!("Zip file uploaded to {:?}", zip_filepath);
 
@@ -240,7 +235,7 @@ async fn upload_app(
         .deploy(pool.get_ref(), &name, &image_name, internal_port)
         .await;
 
-    Ok(HttpResponse::Ok().json(json!({"status": "success", "image": image_name})))
+    Ok(HttpResponse::Ok().json(json!({"status": "success", "name": name})))
 }
 
 #[utoipa::path(
