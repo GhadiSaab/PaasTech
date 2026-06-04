@@ -106,6 +106,11 @@ async fn main() -> std::io::Result<()> {
 
     let http_client = Client::new();
     let scheduler = Scheduler::new();
+    let watcher_pool = pool.clone();
+    let watcher_scheduler = scheduler.clone();
+    tokio::spawn(async move {
+        watcher_scheduler.watch(&watcher_pool).await;
+    });
 
     println!("Running on http://{}:{}", config.host, config.port);
     println!(
