@@ -178,8 +178,9 @@ pub async fn create(
         "name": service_type,
         "version": version,
     });
-    if let Some(app_id) = link {
-        body["application_id"] = serde_json::Value::String(app_id.to_string());
+    if let Some(app_name) = link {
+        let app_uuid = find_app(app_name).await?;
+        body["application_id"] = serde_json::Value::String(app_uuid);
     }
 
     let pb = spinner(&format!("Creating resource {}...", display_name));
@@ -455,7 +456,10 @@ pub async fn env_set(display_name: &str, pair: &str) -> Result<(), String> {
         .map_err(|e| format!("Request failed: {e}"))?;
 
     let mut env_map: HashMap<String, String> = if get_resp.status().is_success() {
-        get_resp.json().await.unwrap_or_default()
+        get_resp
+            .json()
+            .await
+            .map_err(|e| format!("Failed to parse existing env vars: {e}"))?
     } else {
         HashMap::new()
     };
