@@ -214,7 +214,7 @@ async fn upload_app(
         .and_then(|p| p.trim().parse::<u16>().ok())
         .ok_or_else(|| {
             error::ErrorBadRequest(
-                "internal_port is required: specify the port your web app listens on (e.g. 8080)",
+                "internal_port is required: specify the port your web app listens on",
             )
         })?;
 
