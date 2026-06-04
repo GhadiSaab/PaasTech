@@ -14,7 +14,11 @@ struct Resource {
     application_ids: Vec<String>,
 }
 
-async fn find_app(name: &str) -> Result<String, String> {
+async fn find_apps(names: &[&str]) -> Result<Vec<String>, String> {
+    if names.is_empty() {
+        return Ok(Vec::new());
+    }
+
     let resp = reqwest::get(format!("{}/app", api_base()))
         .await
         .map_err(|e| format!("Request failed: {e}"))?;
@@ -34,10 +38,15 @@ async fn find_app(name: &str) -> Result<String, String> {
         .await
         .map_err(|e| format!("Failed to parse response: {e}"))?;
 
-    apps.into_iter()
-        .find(|a| a.name == name)
-        .map(|a| a.id)
-        .ok_or_else(|| format!("App '{}' not found", name))
+    names
+        .iter()
+        .map(|&name| {
+            apps.iter()
+                .find(|a| a.name == name)
+                .map(|a| a.id.clone())
+                .ok_or_else(|| format!("App '{}' not found", name))
+        })
+        .collect()
 }
 
 fn resource_url(id: &str, action: Option<&str>) -> Result<reqwest::Url, String> {
@@ -173,10 +182,7 @@ pub async fn create(
     version: &str,
     links: &[&str],
 ) -> Result<(), String> {
-    let mut app_uuids = Vec::new();
-    for &app_name in links {
-        app_uuids.push(find_app(app_name).await?);
-    }
+    let app_uuids = find_apps(links).await?;
 
     let body = serde_json::json!({
         "display_name": display_name,
@@ -334,9 +340,9 @@ pub async fn edit(display_name: &str, version: Option<&str>, links: &[&str]) -> 
         body["version"] = serde_json::Value::String(v.to_string());
     }
     if !links.is_empty() {
+        let new_uuids = find_apps(links).await?;
         let mut ids: Vec<String> = resource.application_ids.clone();
-        for &app_name in links {
-            let uuid = find_app(app_name).await?;
+        for uuid in new_uuids {
             if !ids.contains(&uuid) {
                 ids.push(uuid);
             }
@@ -367,19 +373,16 @@ pub async fn edit(display_name: &str, version: Option<&str>, links: &[&str]) -> 
 
 // PATCH /resource/{id} — link to one or more applications
 pub async fn attach(display_name: &str, apps: &[&str]) -> Result<(), String> {
-    let mut new_uuids = Vec::new();
-    for &app_name in apps {
-        new_uuids.push(find_app(app_name).await?);
-    }
+    let new_uuids = find_apps(apps).await?;
 
     let pb = spinner(&format!("Attaching {}...", display_name));
     let resource = find_resource(display_name).await?;
     let url = resource_url(&resource.id, None)?;
 
     let mut ids: Vec<String> = resource.application_ids.clone();
-    for uuid in &new_uuids {
-        if !ids.contains(uuid) {
-            ids.push(uuid.clone());
+    for uuid in new_uuids {
+        if !ids.contains(&uuid) {
+            ids.push(uuid);
         }
     }
 
@@ -502,13 +505,18 @@ pub async fn env_set(display_name: &str, pair: &str) -> Result<(), String> {
         .await
         .map_err(|e| format!("Request failed: {e}"))?;
 
-    let mut env_map: HashMap<String, String> = if get_resp.status().is_success() {
-        get_resp
+    let mut env_map: HashMap<String, String> = match get_resp.status().as_u16() {
+        200 => get_resp
             .json()
             .await
-            .map_err(|e| format!("Failed to parse existing env vars: {e}"))?
-    } else {
-        HashMap::new()
+            .map_err(|e| format!("Failed to parse existing env vars: {e}"))?,
+        404 => HashMap::new(),
+        code => {
+            return Err(format!(
+                "Failed to fetch existing env vars: server error {}",
+                code
+            ));
+        }
     };
 
     env_map.insert(key.to_string(), value.to_string());
