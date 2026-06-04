@@ -3,7 +3,9 @@ pages:
   stage: publish
   needs:
     - job: test
+      optional: true
     - job: audit
+      optional: true
   rules:
     - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
   script:
