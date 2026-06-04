@@ -206,7 +206,7 @@ pub async fn delete(name: &str) -> Result<(), String> {
     pb.finish_and_clear();
 
     match resp.status().as_u16() {
-        204 => println!("App {} succesfully deleted", name.bold()),
+        204 => println!("App {} successfully deleted", name.bold()),
         404 => return Err(format!("App '{}' not found", name)),
         code => return Err(format!("Server error: {}", code)),
     }

@@ -303,9 +303,17 @@ pub async fn edit(
     if let Some(v) = version {
         body["version"] = serde_json::Value::String(v.to_string());
     }
-    if let Some(app_id) = link {
-        body["application_ids"] =
-            serde_json::Value::Array(vec![serde_json::Value::String(app_id.to_string())]);
+    if let Some(app_name) = link {
+        let app_uuid = find_app(app_name).await?;
+        let mut ids: Vec<serde_json::Value> = resource
+            .application_ids
+            .iter()
+            .map(|id| serde_json::Value::String(id.clone()))
+            .collect();
+        if !ids.iter().any(|v| v.as_str() == Some(app_uuid.as_str())) {
+            ids.push(serde_json::Value::String(app_uuid));
+        }
+        body["application_ids"] = serde_json::Value::Array(ids);
     }
 
     let client = reqwest::Client::new();

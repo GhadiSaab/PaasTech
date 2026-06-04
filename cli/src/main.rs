@@ -121,7 +121,7 @@ enum ResourceCommands {
         /// Docker Hub version tag
         #[arg(long)]
         version: String,
-        /// Application UUID to link at creation
+        /// Application name to link at creation
         #[arg(long)]
         link: Option<String>,
     },
@@ -144,7 +144,7 @@ enum ResourceCommands {
         /// New Docker Hub version tag
         #[arg(long)]
         version: Option<String>,
-        /// Application UUID to link
+        /// Application name to link
         #[arg(long)]
         link: Option<String>,
     },
@@ -152,7 +152,7 @@ enum ResourceCommands {
     Attach {
         /// Resource name
         name: String,
-        /// Application UUID
+        /// Application name
         #[arg(long)]
         app: String,
     },
