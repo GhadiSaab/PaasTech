@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "\n            SELECT id, name, image_id, container_id, internal_port, port, status, created_at\n            FROM applications\n            WHERE name = $1\n            ",
+  "query": "\n            SELECT id, name, image_id, container_id, internal_port, port, status, base_domain, created_at\n            FROM applications\n            WHERE name = $1\n            ",
   "describe": {
     "columns": [
       {
@@ -40,6 +40,11 @@
       },
       {
         "ordinal": 7,
+        "name": "base_domain",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 8,
         "name": "created_at",
         "type_info": "Timestamp"
       }
@@ -57,8 +62,9 @@
       true,
       true,
       false,
+      true,
       false
     ]
   },
-  "hash": "7439c6d0feec566c87b8bd597a8286cff173acc7e58b6a5d0d3a8fe3245a80e8"
+  "hash": "f232e2c37f7c0c51a75a6265e972fa02803b3edb5f9f6dfe8eb180a979a10fab"
 }
