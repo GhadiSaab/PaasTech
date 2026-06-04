@@ -1,4 +1,5 @@
 use actix_web::rt::time::sleep;
+use bollard::Docker;
 use bollard::models::{
     ContainerCreateBody, EndpointSettings, HostConfig, NetworkCreateRequest, PortBinding,
 };
@@ -7,7 +8,6 @@ use bollard::query_parameters::{
     LogsOptionsBuilder, RemoveContainerOptionsBuilder, RestartContainerOptionsBuilder,
     StartContainerOptionsBuilder, StopContainerOptionsBuilder,
 };
-use bollard::{API_DEFAULT_VERSION, Docker};
 use futures_util::StreamExt;
 use futures_util::TryStreamExt;
 use serde::Serialize;
@@ -119,7 +119,7 @@ impl Scheduler {
         let docker = if docker_host.is_empty() {
             Docker::connect_with_defaults()
         } else {
-            Docker::connect_with_socket(docker_host.as_str(), 120, API_DEFAULT_VERSION)
+            Docker::connect_with_host(docker_host.as_str())
         }
         .expect("Failed to connect to Docker API. If the socket was wrong, plz check the .env");
         Self {
