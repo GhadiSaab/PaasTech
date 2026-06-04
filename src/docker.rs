@@ -101,6 +101,62 @@ pub fn default_env_vars_for_service(name: &str) -> Vec<(String, String)> {
         .collect()
 }
 
+pub fn connection_env_vars_for_service(
+    name: &str,
+    host_port: u16,
+    service_env: &HashMap<String, String>,
+) -> Vec<(String, String)> {
+    let localhost = "localhost".to_string();
+    let port_str = host_port.to_string();
+    match name {
+        "postgres" => {
+            let user = service_env
+                .get("POSTGRES_USER")
+                .map_or("postgres", String::as_str);
+            let password = service_env
+                .get("POSTGRES_PASSWORD")
+                .map_or("postgres", String::as_str);
+            let db = service_env
+                .get("POSTGRES_DB")
+                .map_or("postgres", String::as_str);
+            vec![
+                ("POSTGRES_HOST".into(), localhost),
+                ("POSTGRES_PORT".into(), port_str),
+                (
+                    "DATABASE_URL".into(),
+                    format!(
+                        "postgresql://{}:{}@localhost:{}/{}",
+                        user, password, host_port, db
+                    ),
+                ),
+            ]
+        }
+        "redis" => {
+            let password = service_env.get("REDIS_PASSWORD").map_or("", String::as_str);
+            vec![
+                ("REDIS_HOST".into(), localhost),
+                ("REDIS_PORT".into(), port_str),
+                (
+                    "REDIS_URL".into(),
+                    format!("redis://:{}@localhost:{}", password, host_port),
+                ),
+            ]
+        }
+        "s3" => vec![
+            ("S3_HOST".into(), localhost),
+            ("S3_PORT".into(), port_str),
+            (
+                "S3_ENDPOINT_URL".into(),
+                format!("http://localhost:{}", host_port),
+            ),
+        ],
+        _ => vec![
+            (format!("{}_HOST", name.to_uppercase()), localhost),
+            (format!("{}_PORT", name.to_uppercase()), port_str),
+        ],
+    }
+}
+
 pub fn service_port_for_service(name: &str) -> u16 {
     REGISTRY.get(name).expect("Unknown service").port
 }

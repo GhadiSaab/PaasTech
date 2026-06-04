@@ -1,10 +1,20 @@
 
+.lint-changes: &lint_changes
+  - src/**/*
+  - Cargo.toml
+  - Cargo.lock
+
 fmt:
   extends: .rust-base
   stage: validate
   script:
     - rustup component add rustfmt
     - cargo fmt --check
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+      changes: *lint_changes
+    - if: $CI_COMMIT_BRANCH
+      changes: *lint_changes
 
 clippy:
   extends: .rust-base
@@ -12,3 +22,8 @@ clippy:
   script:
     - rustup component add clippy
     - cargo clippy -- -D warnings
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+      changes: *lint_changes
+    - if: $CI_COMMIT_BRANCH
+      changes: *lint_changes

@@ -1,7 +1,10 @@
 stages:
   - validate
   - test
+  - review
   - publish
+  - package
+  - deploy
 
 variables:
   CARGO_HOME: "$CI_PROJECT_DIR/.cargo"
@@ -21,6 +24,9 @@ variables:
 include:
   - .gitlab/ci/lint.yml
   - .gitlab/ci/test.yml
+  - .gitlab/ci/review.yml
   - .gitlab/ci/security.yml
   - .gitlab/ci/documentation.yml
   - .gitlab/ci/build.yml
+  - .gitlab/ci/package.yml
+  - .gitlab/ci/deploy.yml
