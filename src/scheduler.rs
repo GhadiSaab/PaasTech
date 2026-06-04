@@ -101,6 +101,7 @@ fn traefik_labels(app_name: &str, internal_port: u16) -> HashMap<String, String>
 #[derive(Clone)]
 pub struct Scheduler {
     docker: Docker,
+    docker_host: String,
 }
 
 #[derive(Serialize)]
@@ -113,9 +114,22 @@ pub struct ContainerInfo {
 #[allow(dead_code)]
 impl Scheduler {
     pub fn new() -> Self {
-        let docker =
-            Docker::connect_with_defaults().expect("Impossible de se connecter au Docker Engine");
-        Self { docker }
+        let docker_host = std::env::var("DOCKER_HOST").unwrap_or_default();
+
+        let docker = if docker_host.is_empty() {
+            Docker::connect_with_defaults()
+        } else {
+            Docker::connect_with_host(docker_host.as_str())
+        }
+        .expect("Failed to connect to Docker API. If the socket was wrong, plz check the .env");
+        Self {
+            docker,
+            docker_host,
+        }
+    }
+
+    pub fn docker_host(&self) -> &str {
+        &self.docker_host
     }
 
     pub async fn stop(&self, app_name: &str) {
@@ -218,8 +232,16 @@ impl Scheduler {
         }
     }
 
+    async fn image_exists_locally(&self, image: &str) -> bool {
+        self.docker.inspect_image(image).await.is_ok()
+    }
+
     async fn pull(&self, image: &str) -> Result<String, DeployError> {
         let image_with_tag = image_with_default_tag(image);
+
+        if self.image_exists_locally(&image_with_tag).await {
+            return Ok(image_with_tag);
+        }
 
         let mut stream = self.docker.create_image(
             Some(
@@ -481,53 +503,22 @@ impl Scheduler {
         pool: &PgPool,
         app_name: &str,
         image: &str,
-        internal_port: Option<u16>,
+        internal_port: u16,
     ) -> Result<(), DeployError> {
         let image = self.pull(image).await?;
-        let internal_port = self.resolve_internal_port(&image, internal_port).await?;
 
-        // Stop and remove any existing container only after the replacement is validated.
-        let _ = self
-            .docker
-            .stop_container(
-                app_name,
-                Some(StopContainerOptionsBuilder::default().build()),
-            )
-            .await;
-        let _ = self
-            .docker
-            .remove_container(
-                app_name,
-                Some(RemoveContainerOptionsBuilder::default().build()),
-            )
-            .await;
-
-        let host_port = match find_free_port() {
-            Ok(p) => p,
-            Err(e) => {
-                eprintln!("docker: failed to find free port for {app_name}: {e}");
-                return Err(DeployError::Other(format!(
-                    "Failed to find free port for {app_name}: {e}"
-                )));
-            }
-        };
+        let host_port = find_free_port().map_err(|e| {
+            DeployError::Other(format!("Failed to find free port for {app_name}: {e}"))
+        })?;
 
         let labels = traefik_labels(app_name, internal_port);
 
-        let container_id = match self
+        let container_id = self
             .create_and_start(app_name, &image, internal_port, host_port, labels)
             .await
-        {
-            Ok(id) => id,
-            Err(e) => {
-                eprintln!("docker: failed to create/start {app_name}: {e}");
-                return Err(DeployError::Other(format!(
-                    "Failed to create/start {app_name}: {e}"
-                )));
-            }
-        };
+            .map_err(|e| DeployError::Other(format!("Failed to create/start {app_name}: {e}")))?;
 
-        if let Err(e) = Registry::save(
+        Registry::save(
             pool,
             app_name,
             &image,
@@ -537,11 +528,7 @@ impl Scheduler {
             "running",
         )
         .await
-        {
-            return Err(DeployError::Other(format!(
-                "Failed to save app {app_name}: {e}"
-            )));
-        }
+        .map_err(|e| DeployError::Other(format!("Failed to save app {app_name}: {e}")))?;
 
         Ok(())
     }
@@ -551,11 +538,10 @@ impl Scheduler {
         pool: &PgPool,
         app_name: &str,
         image: &str,
-        internal_port: Option<u16>,
+        internal_port: u16,
         host_port: u16,
     ) -> Result<(), DeployError> {
         let image = self.pull(image).await?;
-        let internal_port = self.resolve_internal_port(&image, internal_port).await?;
 
         let _ = self
             .docker
@@ -564,6 +550,7 @@ impl Scheduler {
                 Some(StopContainerOptionsBuilder::default().build()),
             )
             .await;
+
         let _ = self
             .docker
             .remove_container(
@@ -574,26 +561,20 @@ impl Scheduler {
 
         let labels = traefik_labels(app_name, internal_port);
 
-        let container_id = match self
+        let container_id = self
             .create_and_start(app_name, &image, internal_port, host_port, labels)
             .await
-        {
-            Ok(id) => id,
-            Err(e) => {
-                eprintln!("docker: failed to recreate {app_name}: {e}");
-                return Err(DeployError::Other(format!(
-                    "Failed to recreate {app_name}: {e}"
-                )));
-            }
-        };
+            .map_err(|e| DeployError::Other(format!("Failed to recreate {app_name}: {e}")))?;
 
-        if let Err(e) = Registry::update_container_id(pool, app_name, &container_id).await {
-            eprintln!("registry: failed to update container_id for {app_name}: {e}");
-        }
+        Registry::update_container_id(pool, app_name, &container_id)
+            .await
+            .map_err(|e| DeployError::Other(format!("Failed to update container_id: {e}")))?;
 
-        if let Err(e) = Registry::update_status(pool, app_name, "running").await {
-            eprintln!("registry: failed to update status for {app_name}: {e}");
-        }
+        Registry::update_status(pool, app_name, "running")
+            .await
+            .map_err(|e| {
+                DeployError::Other(format!("Failed to update status for {app_name}: {e}"))
+            })?;
 
         Ok(())
     }

@@ -10,7 +10,7 @@ uuid = { version = "1", features = ["serde", "v4"] }
 actix-web = "4"
 actix-multipart = "0.7"
 futures-util = "0.3"
-tokio = "1.52.1"
+tokio = { version = "1.52.1", features = ["process"] }
 bollard = "*"
 dotenvy = "0.15"
 serde = { version = "1.0.228", features = ["derive"] }
