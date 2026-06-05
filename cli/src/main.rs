@@ -2,7 +2,7 @@ mod commands;
 
 use clap::{CommandFactory, Parser, Subcommand};
 use clap_complete::{Shell, generate};
-use commands::{apps, services};
+use commands::{apps, resources};
 use std::io;
 
 #[derive(Parser)]
@@ -24,10 +24,10 @@ enum Commands {
         #[command(subcommand)]
         command: AppCommands,
     },
-    /// Manage services (postgres, redis, s3)
-    Service {
+    /// Manage resources (postgres, redis, s3)
+    Resource {
         #[command(subcommand)]
-        command: ServiceCommands,
+        command: ResourceCommands,
     },
     /// Generate shell completion script
     Completion {
@@ -46,9 +46,9 @@ enum AppCommands {
         /// Docker image to deploy (e.g. nginx, node:20)
         #[arg(long)]
         image: String,
-        /// Internal port the application listens on (detected from EXPOSE when omitted)
-        #[arg(long, value_parser = clap::value_parser!(u16).range(1..))]
-        port: Option<u16>,
+        /// Port the container exposes (1-65535)
+        #[arg(long, default_value = "8080", value_parser = clap::value_parser!(u16).range(1..))]
+        port: u16,
     },
     /// List all applications
     List,
@@ -82,6 +82,9 @@ enum AppCommands {
     Logs {
         /// Application name
         name: String,
+        /// Number of lines to show from the end
+        #[arg(long)]
+        tail: Option<u32>,
     },
     /// Manage environment variables
     Env {
@@ -107,33 +110,94 @@ enum EnvCommands {
 }
 
 #[derive(Subcommand)]
-enum ServiceCommands {
-    /// Create a managed service
+enum ResourceCommands {
+    /// Create a managed resource
     Create {
-        /// Service name
+        /// Resource display name
         name: String,
-        /// Service type
+        /// Resource type
         #[arg(long, value_parser = ["postgres", "redis", "s3"])]
         r#type: String,
-    },
-    /// List all services
-    List,
-    /// Delete a service
-    Delete {
-        /// Service name
-        name: String,
-    },
-    /// Attach a service to an application
-    Attach {
-        /// Service name
-        name: String,
-        /// Application to attach to
+        /// Docker Hub version tag
         #[arg(long)]
-        app: String,
+        version: String,
+        /// Application name to link at creation (repeatable)
+        #[arg(long)]
+        link: Vec<String>,
     },
-    /// Show info about a service
+    /// List all resources
+    List,
+    /// Show info about a resource
     Info {
-        /// Service name
+        /// Resource name
+        name: String,
+    },
+    /// Delete a resource
+    Delete {
+        /// Resource name
+        name: String,
+    },
+    /// Update a resource's version or linked application
+    Edit {
+        /// Resource name
+        name: String,
+        /// New Docker Hub version tag
+        #[arg(long)]
+        version: Option<String>,
+        /// Application name to link (repeatable)
+        #[arg(long)]
+        link: Vec<String>,
+    },
+    /// Attach a resource to one or more applications
+    Attach {
+        /// Resource name
+        name: String,
+        /// Application name (repeatable)
+        #[arg(long)]
+        app: Vec<String>,
+    },
+    /// Start a stopped resource
+    Start {
+        /// Resource name
+        name: String,
+    },
+    /// Stop a running resource
+    Stop {
+        /// Resource name
+        name: String,
+    },
+    /// Show logs for a resource
+    Logs {
+        /// Resource name
+        name: String,
+        /// Number of lines to show from the end
+        #[arg(long)]
+        tail: Option<u32>,
+    },
+    /// List available versions for a service type (e.g. postgres, redis, s3)
+    Versions {
+        /// Service type name
+        name: String,
+    },
+    /// Manage environment variables
+    Env {
+        #[command(subcommand)]
+        command: ResourceEnvCommands,
+    },
+}
+
+#[derive(Subcommand)]
+enum ResourceEnvCommands {
+    /// Set an environment variable (format: KEY=VALUE)
+    Set {
+        /// Resource name
+        name: String,
+        /// Key=Value pair
+        pair: String,
+    },
+    /// List environment variables for a resource
+    List {
+        /// Resource name
         name: String,
     },
 }
@@ -159,18 +223,45 @@ async fn main() {
             AppCommands::Stop { name } => apps::stop(&name).await,
             AppCommands::Restart { name } => apps::restart(&name).await,
             AppCommands::Upload { source } => apps::upload(&source).await,
-            AppCommands::Logs { name } => apps::logs(&name).await,
+            AppCommands::Logs { name, tail } => apps::logs(&name, tail).await,
             AppCommands::Env { command } => match command {
                 EnvCommands::Set { name, pair } => apps::env_set(&name, &pair).await,
                 EnvCommands::List { name } => apps::env_list(&name).await,
             },
         },
-        Commands::Service { command } => match command {
-            ServiceCommands::Create { name, r#type } => services::create(&name, &r#type).await,
-            ServiceCommands::List => services::list().await,
-            ServiceCommands::Delete { name } => services::delete(&name).await,
-            ServiceCommands::Attach { name, app } => services::attach(&name, &app).await,
-            ServiceCommands::Info { name } => services::info(&name).await,
+        Commands::Resource { command } => match command {
+            ResourceCommands::Create {
+                name,
+                r#type,
+                version,
+                link,
+            } => {
+                let refs: Vec<&str> = link.iter().map(|s| s.as_str()).collect();
+                resources::create(&name, &r#type, &version, &refs).await
+            }
+            ResourceCommands::List => resources::list().await,
+            ResourceCommands::Info { name } => resources::info(&name).await,
+            ResourceCommands::Delete { name } => resources::delete(&name).await,
+            ResourceCommands::Edit {
+                name,
+                version,
+                link,
+            } => {
+                let refs: Vec<&str> = link.iter().map(|s| s.as_str()).collect();
+                resources::edit(&name, version.as_deref(), &refs).await
+            }
+            ResourceCommands::Attach { name, app } => {
+                let refs: Vec<&str> = app.iter().map(|s| s.as_str()).collect();
+                resources::attach(&name, &refs).await
+            }
+            ResourceCommands::Start { name } => resources::start(&name).await,
+            ResourceCommands::Stop { name } => resources::stop(&name).await,
+            ResourceCommands::Logs { name, tail } => resources::logs(&name, tail).await,
+            ResourceCommands::Versions { name } => resources::versions(&name).await,
+            ResourceCommands::Env { command } => match command {
+                ResourceEnvCommands::Set { name, pair } => resources::env_set(&name, &pair).await,
+                ResourceEnvCommands::List { name } => resources::env_list(&name).await,
+            },
         },
     };
 

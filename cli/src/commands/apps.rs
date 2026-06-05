@@ -1,10 +1,8 @@
+use super::utils::{colored_status, spinner};
 use crate::api_base;
 use colored::Colorize;
-use indicatif::{ProgressBar, ProgressStyle};
 use serde::Deserialize;
 use serde_json::Value;
-use std::io::{self, Write};
-use std::time::Duration;
 
 #[derive(Deserialize)]
 struct App {
@@ -15,15 +13,6 @@ struct App {
     #[allow(dead_code)]
     env: Option<Value>,
     created_at: Option<String>,
-}
-
-fn colored_status(status: &str) -> (String, usize) {
-    let plain = match status {
-        "running" => status.green().to_string(),
-        "stopped" | "error" => status.red().to_string(),
-        _ => status.yellow().to_string(),
-    };
-    (plain, status.len())
 }
 
 fn print_table(apps: &[App]) {
@@ -99,73 +88,35 @@ fn print_table(apps: &[App]) {
     println!("{}", sep);
 }
 
-fn spinner(msg: &str) -> ProgressBar {
-    let pb = ProgressBar::new_spinner();
-    pb.set_style(
-        ProgressStyle::default_spinner()
-            .tick_strings(&["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"])
-            .template("{spinner:.cyan} {msg}")
-            .unwrap(),
-    );
-    pb.set_message(msg.to_string());
-    pb.enable_steady_tick(Duration::from_millis(80));
-    pb
-}
-
 // POST /app/deploy — exists
-fn prompt_for_port() -> Result<u16, String> {
-    loop {
-        print!("Internal application port: ");
-        io::stdout()
-            .flush()
-            .map_err(|e| format!("Failed to write prompt: {e}"))?;
+pub async fn deploy(name: &str, image: &str, port: u16) -> Result<(), String> {
+    let pb = spinner(&format!("Deploying {} ({})", name, image));
 
-        let mut input = String::new();
-        io::stdin()
-            .read_line(&mut input)
-            .map_err(|e| format!("Failed to read port: {e}"))?;
-
-        match input.trim().parse::<u16>() {
-            Ok(port) if port > 0 => return Ok(port),
-            _ => eprintln!("Enter a port between 1 and 65535."),
-        }
-    }
-}
-
-pub async fn deploy(name: &str, image: &str, mut port: Option<u16>) -> Result<(), String> {
     let client = reqwest::Client::new();
-    loop {
-        let pb = spinner(&format!("Deploying {} ({})", name, image));
-        let body = serde_json::json!({
-            "name": name,
-            "image": image,
-            "port": port
-        });
+    let body = serde_json::json!({
+        "name": name,
+        "image": image,
+        "port": port
+    });
 
-        let resp = client
-            .post(format!("{}/app/deploy", api_base()))
-            .json(&body)
-            .send()
-            .await
-            .map_err(|e| format!("Request failed: {e}"))?;
+    let resp = client
+        .post(format!("{}/app/deploy", api_base()))
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| format!("Request failed: {e}"))?;
 
-        pb.finish_and_clear();
+    pb.finish_and_clear();
 
-        if resp.status().is_success() {
-            println!("{} App {} deployed", "✓".green(), name.bold());
-            return Ok(());
-        }
-
+    if resp.status().is_success() {
+        println!("{} App {} deployed", "✓".green(), name.bold());
+    } else {
         let status = resp.status();
         let text = resp.text().await.unwrap_or_default();
-        if status == reqwest::StatusCode::UNPROCESSABLE_ENTITY && port.is_none() {
-            eprintln!("{text}");
-            port = Some(prompt_for_port()?);
-            continue;
-        }
-
         return Err(format!("Deploy failed ({}): {}", status, text));
     }
+
+    Ok(())
 }
 
 // GET /app — exists
@@ -203,12 +154,14 @@ fn app_url(name: &str, action: &str) -> Result<reqwest::Url, String> {
 // POST /app/{name}/stop — exists
 pub async fn stop(name: &str) -> Result<(), String> {
     let url = app_url(name, "stop")?;
+    let pb = spinner(&format!("Stopping {}...", name));
     let client = reqwest::Client::new();
     let resp = client
         .post(url)
         .send()
         .await
         .map_err(|e| format!("Request failed: {e}"))?;
+    pb.finish_and_clear();
 
     match resp.status().as_u16() {
         200 => println!("{} App {} stopped", "✓".green(), name.bold()),
@@ -222,12 +175,14 @@ pub async fn stop(name: &str) -> Result<(), String> {
 // POST /app/{name}/restart — exists
 pub async fn restart(name: &str) -> Result<(), String> {
     let url = app_url(name, "restart")?;
+    let pb = spinner(&format!("Restarting {}...", name));
     let client = reqwest::Client::new();
     let resp = client
         .post(url)
         .send()
         .await
         .map_err(|e| format!("Request failed: {e}"))?;
+    pb.finish_and_clear();
 
     match resp.status().as_u16() {
         200 => println!("{} App {} restarted", "✓".green(), name.bold()),
@@ -238,15 +193,32 @@ pub async fn restart(name: &str) -> Result<(), String> {
     Ok(())
 }
 
-// DELETE /app/{name} — NOT implemented on server
+// DELETE /app/{name}
 pub async fn delete(name: &str) -> Result<(), String> {
-    // TODO: route DELETE /app/{name} not yet implemented on server
-    println!("{}", "This command is not yet available".yellow());
-    let _ = name;
+    let mut url = reqwest::Url::parse(&api_base()).map_err(|e| format!("Invalid API URL: {e}"))?;
+    url.path_segments_mut()
+        .map_err(|_| "API URL cannot be a base".to_string())?
+        .extend(&["app", name]);
+    let url = url;
+    let pb = spinner(&format!("Deleting {}...", name));
+    let client = reqwest::Client::new();
+    let resp = client
+        .delete(url)
+        .send()
+        .await
+        .map_err(|e| format!("Request failed: {e}"))?;
+    pb.finish_and_clear();
+
+    match resp.status().as_u16() {
+        204 => println!("App {} successfully deleted", name.bold()),
+        404 => return Err(format!("App '{}' not found", name)),
+        code => return Err(format!("Server error: {}", code)),
+    }
+
     Ok(())
 }
 
-// GET /app/{name} — NOT implemented on server (only GET /app/{name}/status exists)
+// GET /app/{name}
 pub async fn info(name: &str) -> Result<(), String> {
     // Status exists: GET /app/{name}/status
     let url = app_url(name, "status")?;
@@ -354,26 +326,88 @@ pub async fn upload(source: &str) -> Result<(), String> {
     }
 }
 
-// GET /app/{name}/logs — NOT implemented on server
-pub async fn logs(name: &str) -> Result<(), String> {
-    // TODO: route GET /app/{name}/logs not yet implemented on server
-    println!("{}", "This command is not yet available".yellow());
-    let _ = name;
+// GET /app/{name}/logs
+pub async fn logs(name: &str, tail: Option<u32>) -> Result<(), String> {
+    let mut url = app_url(name, "logs")?;
+    if let Some(n) = tail {
+        url.query_pairs_mut().append_pair("tail", &n.to_string());
+    }
+
+    let resp = reqwest::get(url)
+        .await
+        .map_err(|e| format!("Request failed: {e}"))?;
+
+    match resp.status().as_u16() {
+        200 => {
+            let text = resp.text().await.unwrap_or_default();
+            print!("{}", text);
+        }
+        404 => return Err(format!("App '{}' not found", name)),
+        code => return Err(format!("Server error: {}", code)),
+    }
+
     Ok(())
 }
 
-// POST /app/{name}/env — NOT implemented on server
+// POST /app/{name}/env
 pub async fn env_set(name: &str, pair: &str) -> Result<(), String> {
-    // TODO: route POST /app/{name}/env not yet implemented on server
-    println!("{}", "This command is not yet available".yellow());
-    let _ = (name, pair);
+    let (key, value) = pair
+        .split_once('=')
+        .ok_or_else(|| "Invalid format: expected KEY=VALUE".to_string())?;
+
+    let url = app_url(name, "env")?;
+    let pb = spinner(&format!("Setting env for {}...", name));
+    let client = reqwest::Client::new();
+    let body = serde_json::json!({ "key": key, "value": value });
+
+    let resp = client
+        .post(url)
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| format!("Request failed: {e}"))?;
+    pb.finish_and_clear();
+
+    match resp.status().as_u16() {
+        200 | 201 | 204 => println!("{} {}={}", "✓".green(), key.bold(), value),
+        404 => return Err(format!("App '{}' not found", name)),
+        code => {
+            let text = resp.text().await.unwrap_or_default();
+            return Err(format!("Server error ({}): {}", code, text));
+        }
+    }
+
     Ok(())
 }
 
-// GET /app/{name}/env — NOT implemented on server
+// GET /app/{name}/env
 pub async fn env_list(name: &str) -> Result<(), String> {
-    // TODO: route GET /app/{name}/env not yet implemented on server
-    println!("{}", "This command is not yet available".yellow());
-    let _ = name;
+    let url = app_url(name, "env")?;
+    let resp = reqwest::get(url)
+        .await
+        .map_err(|e| format!("Request failed: {e}"))?;
+
+    match resp.status().as_u16() {
+        200 => {
+            let vars: serde_json::Map<String, Value> = resp
+                .json()
+                .await
+                .map_err(|e| format!("Failed to parse response: {e}"))?;
+            if vars.is_empty() {
+                println!("No environment variables set.");
+            } else {
+                for (key, val) in &vars {
+                    let v = val
+                        .as_str()
+                        .map(|s| s.to_string())
+                        .unwrap_or_else(|| val.to_string());
+                    println!("{}={}", key.bold(), v);
+                }
+            }
+        }
+        404 => return Err(format!("App '{}' not found", name)),
+        code => return Err(format!("Server error: {}", code)),
+    }
+
     Ok(())
 }

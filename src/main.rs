@@ -71,6 +71,7 @@ async fn init() -> Config {
         logs_app,
         logs_resource,
         get_app_env,
+        set_app_env,
         update_app_env,
         create_resource,
         get_resources,
@@ -138,6 +139,7 @@ async fn main() -> std::io::Result<()> {
             .service(logs_app)
             .service(logs_resource)
             .service(get_app_env)
+            .service(set_app_env)
             .service(update_app_env)
             .service(create_resource)
             .service(get_resources)
@@ -754,6 +756,62 @@ async fn get_app_env(pool: web::Data<PgPool>, path: web::Path<String>) -> impl R
 
     let env_map: HashMap<String, String> = rows.into_iter().map(|r| (r.key, r.value)).collect();
     HttpResponse::Ok().json(env_map)
+}
+
+#[derive(Deserialize)]
+struct EnvSetPayload {
+    key: String,
+    value: String,
+}
+
+#[utoipa::path(
+    post,
+    path = "/app/{app_name}/env",
+    params(("app_name" = String, Path, description = "Application name")),
+    request_body(
+        content_type = "application/json",
+        description = "Single environment variable to set or update: {\"key\": \"K\", \"value\": \"V\"}"
+    ),
+    responses(
+        (status = 200, description = "Environment variable set"),
+        (status = 404, description = "Application not found"),
+        (status = 500, description = "Internal server error"),
+    ),
+    tag = "apps"
+)]
+#[post("/app/{app_name}/env")]
+async fn set_app_env(
+    pool: web::Data<PgPool>,
+    path: web::Path<String>,
+    payload: web::Json<EnvSetPayload>,
+) -> impl Responder {
+    let app_name = path.into_inner();
+    let app = match Registry::get(&pool, &app_name).await {
+        Ok(Some(app)) => app,
+        Ok(None) => return HttpResponse::NotFound().finish(),
+        Err(e) => {
+            eprintln!("registry: get failed for {app_name}: {e}");
+            return HttpResponse::InternalServerError().finish();
+        }
+    };
+
+    let result = sqlx::query!(
+        "INSERT INTO application_env_vars (application_id, key, value) VALUES ($1, $2, $3) \
+         ON CONFLICT (application_id, key) DO UPDATE SET value = EXCLUDED.value",
+        app.id,
+        payload.key,
+        payload.value,
+    )
+    .execute(pool.get_ref())
+    .await;
+
+    match result {
+        Ok(_) => HttpResponse::Ok().finish(),
+        Err(e) => {
+            eprintln!("registry: failed to set env var for {app_name}: {e}");
+            HttpResponse::InternalServerError().finish()
+        }
+    }
 }
 
 #[utoipa::path(
