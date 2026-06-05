@@ -1,16 +1,46 @@
 use actix_multipart::Multipart;
 use actix_web::{Error, web};
 use futures_util::TryStreamExt;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Component, Path, PathBuf};
 use tokio::fs::File;
 use tokio::io::AsyncWriteExt;
 use tokio::process::Command as TokioCommand;
-use uuid::Uuid;
 
 pub struct MultipartData {
     pub file_path: Option<PathBuf>,
     pub fields: HashMap<String, String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum ProcessType {
+    Web,
+    Worker,
+}
+
+impl ProcessType {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Web => "web",
+            Self::Worker => "worker",
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct ProcessDefinition {
+    pub name: String,
+    #[serde(rename = "type")]
+    pub process_type: ProcessType,
+    pub path: String,
+    pub port: Option<u16>,
+}
+
+#[derive(Debug, Deserialize)]
+struct PaastechManifest {
+    processes: Vec<ProcessDefinition>,
 }
 
 pub async fn save_multipart_file(mut payload: Multipart) -> Result<MultipartData, Error> {
@@ -46,6 +76,88 @@ pub async fn save_multipart_file(mut payload: Multipart) -> Result<MultipartData
     Ok(MultipartData { file_path, fields })
 }
 
+pub fn process_container_name(app_name: &str, process_name: &str) -> String {
+    format!("{app_name}-{process_name}")
+}
+
+pub fn load_process_definitions(
+    root: &Path,
+    fallback_port: Option<u16>,
+) -> Result<Vec<ProcessDefinition>, String> {
+    let manifest_path = root.join("paastech.toml");
+
+    if !manifest_path.is_file() {
+        return Ok(vec![ProcessDefinition {
+            name: "web".to_string(),
+            process_type: ProcessType::Web,
+            path: ".".to_string(),
+            port: fallback_port,
+        }]);
+    }
+
+    let manifest = std::fs::read_to_string(&manifest_path)
+        .map_err(|e| format!("Failed to read {}: {e}", manifest_path.display()))?;
+    let manifest: PaastechManifest =
+        toml::from_str(&manifest).map_err(|e| format!("Invalid paastech.toml: {e}"))?;
+
+    if manifest.processes.is_empty() {
+        return Err("paastech.toml must declare at least one process".to_string());
+    }
+
+    for process in &manifest.processes {
+        validate_process_definition(root, process)?;
+    }
+
+    Ok(manifest.processes)
+}
+
+fn validate_process_definition(root: &Path, process: &ProcessDefinition) -> Result<(), String> {
+    if process.name.trim().is_empty() {
+        return Err("process name cannot be empty".to_string());
+    }
+
+    if process
+        .name
+        .chars()
+        .any(|c| !(c.is_ascii_alphanumeric() || c == '-'))
+    {
+        return Err(format!(
+            "process '{}' must only contain letters, numbers, and hyphens",
+            process.name
+        ));
+    }
+
+    let path = Path::new(&process.path);
+    if path.is_absolute()
+        || path
+            .components()
+            .any(|component| matches!(component, Component::ParentDir))
+    {
+        return Err(format!(
+            "process '{}' path must stay inside the uploaded archive",
+            process.name
+        ));
+    }
+
+    let context = root.join(path);
+    if !context.is_dir() {
+        return Err(format!(
+            "process '{}' build context does not exist: {}",
+            process.name,
+            context.display()
+        ));
+    }
+
+    if process.process_type == ProcessType::Web && process.port.is_none() {
+        return Err(format!(
+            "web process '{}' must declare a port in paastech.toml",
+            process.name
+        ));
+    }
+
+    Ok(())
+}
+
 pub async fn extract_zip(source: PathBuf) -> Result<PathBuf, String> {
     let mut dest_path = source.clone();
     if let Some(stem) = source.file_stem() {
@@ -67,13 +179,15 @@ pub async fn extract_zip(source: PathBuf) -> Result<PathBuf, String> {
     .map(|_| dest_path)
 }
 
-pub async fn build_image(from: String, docker_host: &str) -> Result<String, String> {
-    let image_name = format!("paastech-{}", Uuid::new_v4());
-
+pub async fn build_image_with_name(
+    image_name: &str,
+    from: String,
+    docker_host: &str,
+) -> Result<(), String> {
     let builder = std::env::var("BUILDER").map_err(|_| "BUILDER env var is not set".to_string())?;
 
     let mut cmd = TokioCommand::new("pack");
-    cmd.args(["build", &image_name, "--path", &from, "--builder", &builder]);
+    cmd.args(["build", image_name, "--path", &from, "--builder", &builder]);
 
     if !docker_host.is_empty() {
         cmd.args(["--docker-host", docker_host]);
@@ -93,5 +207,5 @@ pub async fn build_image(from: String, docker_host: &str) -> Result<String, Stri
         ));
     }
 
-    Ok(image_name)
+    Ok(())
 }
