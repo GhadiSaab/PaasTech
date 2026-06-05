@@ -31,6 +31,21 @@ CREATE TABLE IF NOT EXISTS application_services (
     FOREIGN KEY (service_id) REFERENCES services(id) ON DELETE CASCADE
 );
 
+CREATE TABLE IF NOT EXISTS application_processes (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    application_id UUID NOT NULL REFERENCES applications(id) ON DELETE CASCADE,
+    name VARCHAR(50) NOT NULL,
+    process_type VARCHAR(20) NOT NULL,
+    build_context TEXT NOT NULL,
+    image_id varchar(128) NULL,
+    container_id varchar(128) NULL,
+    internal_port INTEGER NULL,
+    host_port INTEGER NULL,
+    status VARCHAR(20) NOT NULL DEFAULT 'building',
+    created_at TIMESTAMP NOT NULL DEFAULT now(),
+    UNIQUE(application_id, name)
+);
+
 CREATE TABLE IF NOT EXISTS service_env_vars (
     service_id UUID NOT NULL REFERENCES services(id) ON DELETE CASCADE,
     key VARCHAR(255) NOT NULL,
