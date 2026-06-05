@@ -449,7 +449,15 @@ async fn test_delete_running_resource_removes_container() {
     let id = Uuid::new_v4();
 
     let (container_id, host_port) = scheduler
-        .start_service(&id.to_string(), "redis:7", 6379, None, vec![], vec![])
+        .start_service(
+            &id.to_string(),
+            crate::registry::DEFAULT_PROJECT_NETWORK,
+            "redis:7",
+            6379,
+            None,
+            vec![],
+            vec![],
+        )
         .await
         .unwrap();
 

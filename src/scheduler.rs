@@ -16,8 +16,9 @@ use sqlx::PgPool;
 use std::collections::HashMap;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use crate::engine::{ProcessType, process_container_name};
+use crate::engine::ProcessType;
 use crate::registry::{App, Registry};
+use uuid::Uuid;
 
 #[derive(Debug)]
 pub enum DeployError {
@@ -43,9 +44,21 @@ pub(crate) fn find_free_port() -> Result<u16, std::io::Error> {
     Ok(listener.local_addr()?.port())
 }
 
-fn paas_net() -> HashMap<String, EndpointSettings> {
+pub fn app_container_name(project_id: Uuid, app_name: &str) -> String {
+    format!("paastech-{}-{}", project_id.simple(), app_name)
+}
+
+pub fn app_process_container_name(project_id: Uuid, app_name: &str, process_name: &str) -> String {
+    format!(
+        "{}-{}",
+        app_container_name(project_id, app_name),
+        process_name
+    )
+}
+
+fn project_net(network_name: &str) -> HashMap<String, EndpointSettings> {
     let mut m = HashMap::new();
-    m.insert("paas-net".to_string(), EndpointSettings::default());
+    m.insert(network_name.to_string(), EndpointSettings::default());
     m
 }
 
@@ -244,23 +257,29 @@ impl Scheduler {
         false
     }
 
-    async fn mark_app_status(pool: &PgPool, app_name: &str, status: &str) {
-        if let Err(e) = Registry::update_status(pool, app_name, status).await {
+    async fn mark_app_status(pool: &PgPool, project_id: Uuid, app_name: &str, status: &str) {
+        if let Err(e) = Registry::update_status(pool, project_id, app_name, status).await {
             eprintln!("watch: failed to update status for {app_name}: {e}");
         }
     }
 
-    async fn restart_exited_app(&self, pool: &PgPool, app_name: &str) {
+    async fn restart_exited_app(
+        &self,
+        pool: &PgPool,
+        project_id: Uuid,
+        app_name: &str,
+        container_name: &str,
+    ) {
         println!("watch: app {app_name} crashed, restarting");
-        Self::mark_app_status(pool, app_name, "crashed").await;
+        Self::mark_app_status(pool, project_id, app_name, "crashed").await;
 
-        match self.restart(app_name).await {
+        match self.restart(container_name).await {
             Ok(()) => {
                 if self
-                    .wait_until_running(app_name, Duration::from_secs(10))
+                    .wait_until_running(container_name, Duration::from_secs(10))
                     .await
                 {
-                    Self::mark_app_status(pool, app_name, "running").await;
+                    Self::mark_app_status(pool, project_id, app_name, "running").await;
                 } else {
                     eprintln!("watch: app {app_name} did not reach running after restart");
                 }
@@ -297,17 +316,30 @@ impl Scheduler {
                     eprintln!(
                         "watch: process {container_name} did not reach running after restart"
                     );
+                    let _ = Registry::update_process_status(pool, process_id, "failed").await;
                 }
             }
             Err(e) => {
                 eprintln!("watch: failed to restart process {container_name}: {e}");
+                let _ = Registry::update_process_status(pool, process_id, "failed").await;
             }
         }
     }
 
     async fn recreate_missing_app(&self, pool: &PgPool, app: &App) {
         println!("watch: app {} container is missing, recreating", app.name);
-        Self::mark_app_status(pool, &app.name, "crashed").await;
+        Self::mark_app_status(pool, app.project_id, &app.name, "crashed").await;
+        let project = match Registry::get_project_by_id(pool, app.project_id).await {
+            Ok(Some(project)) => project,
+            Ok(None) => {
+                eprintln!("watch: cannot recreate {} without a project", app.name);
+                return;
+            }
+            Err(e) => {
+                eprintln!("watch: failed to load project for {}: {e}", app.name);
+                return;
+            }
+        };
 
         let image = match app.image_id.as_deref().filter(|image| !image.is_empty()) {
             Some(image) => image,
@@ -340,23 +372,37 @@ impl Scheduler {
             },
         };
 
+        let env_vars = match Registry::merged_env_vars(pool, app.project_id, app.id).await {
+            Ok(vars) => vars,
+            Err(e) => {
+                eprintln!("watch: failed to fetch env vars for {}: {e}", app.name);
+                return;
+            }
+        };
+
         match self
             .redeploy(
                 pool,
+                app.project_id,
+                &project.network_name,
                 &app.name,
                 image,
                 internal_port,
                 host_port,
+                env_vars,
                 app.base_domain.as_deref(),
             )
             .await
         {
             Ok(()) => {
                 if self
-                    .wait_until_running(&app.name, Duration::from_secs(10))
+                    .wait_until_running(
+                        &app_container_name(app.project_id, &app.name),
+                        Duration::from_secs(10),
+                    )
                     .await
                 {
-                    Self::mark_app_status(pool, &app.name, "running").await;
+                    Self::mark_app_status(pool, app.project_id, &app.name, "running").await;
                 } else {
                     eprintln!(
                         "watch: app {} did not reach running after recreate",
@@ -370,6 +416,81 @@ impl Scheduler {
         }
     }
 
+    async fn recreate_missing_process(
+        &self,
+        pool: &PgPool,
+        process: &crate::registry::ActiveAppProcess,
+    ) {
+        let container_name = app_process_container_name(
+            process.project_id,
+            &process.app_name,
+            &process.process_name,
+        );
+        println!("watch: process {container_name} is missing, recreating");
+        let _ = Registry::update_process_status(pool, process.id, "crashed").await;
+
+        let image = match process.image_id.as_deref().filter(|s| !s.is_empty()) {
+            Some(img) => img,
+            None => {
+                eprintln!("watch: cannot recreate process {container_name}: no image_id");
+                return;
+            }
+        };
+
+        let env_vars =
+            match Registry::merged_env_vars(pool, process.project_id, process.application_id).await
+            {
+                Ok(vars) => vars,
+                Err(e) => {
+                    eprintln!("watch: failed to fetch env vars for process {container_name}: {e}");
+                    return;
+                }
+            };
+
+        match self
+            .start_process(
+                process.project_id,
+                &process.project_network,
+                &process.app_name,
+                &process.process_name,
+                &process.process_type,
+                image,
+                process.internal_port.map(|p| p as u16),
+                process.base_domain.as_deref(),
+                process.public_host.as_deref(),
+                env_vars,
+            )
+            .await
+        {
+            Ok(started) => {
+                let wait_name = container_name.clone();
+                if self
+                    .wait_until_running(&wait_name, Duration::from_secs(10))
+                    .await
+                {
+                    let _ = Registry::update_process_running(
+                        pool,
+                        process.id,
+                        image,
+                        &started.container_id,
+                        started.internal_port.map(|p| p as i32),
+                        started.host_port.map(|p| p as i32),
+                    )
+                    .await;
+                } else {
+                    eprintln!(
+                        "watch: process {container_name} did not reach running after recreate"
+                    );
+                    let _ = Registry::update_process_status(pool, process.id, "failed").await;
+                }
+            }
+            Err(e) => {
+                eprintln!("watch: failed to recreate process {container_name}: {e}");
+                let _ = Registry::update_process_status(pool, process.id, "failed").await;
+            }
+        }
+    }
+
     pub async fn watch(&self, pool: &PgPool) {
         loop {
             sleep(Duration::from_secs(5)).await;
@@ -377,8 +498,11 @@ impl Scheduler {
             match Registry::list_active_processes(pool).await {
                 Ok(processes) => {
                     for process in processes {
-                        let container_name =
-                            process_container_name(&process.app_name, &process.process_name);
+                        let container_name = app_process_container_name(
+                            process.project_id,
+                            &process.app_name,
+                            &process.process_name,
+                        );
                         let status = self.inspect(&container_name).await;
 
                         match status.as_str() {
@@ -387,12 +511,7 @@ impl Scheduler {
                                     .await;
                             }
                             "unknown" => {
-                                eprintln!(
-                                    "watch: process {container_name} is missing and needs recreation"
-                                );
-                                let _ =
-                                    Registry::update_process_status(pool, process.id, "crashed")
-                                        .await;
+                                self.recreate_missing_process(pool, &process).await;
                             }
                             _ => {}
                         }
@@ -401,7 +520,7 @@ impl Scheduler {
                 Err(e) => eprintln!("watch: failed to list app processes: {e}"),
             }
 
-            let apps = match Registry::list(pool).await {
+            let apps = match Registry::list_all(pool).await {
                 Ok(apps) => apps,
                 Err(e) => {
                     eprintln!("watch: failed to list apps from registry: {e}");
@@ -425,10 +544,14 @@ impl Scheduler {
                     continue;
                 }
 
-                let status = self.inspect(&app.name).await;
+                let container_name = app_container_name(app.project_id, &app.name);
+                let status = self.inspect(&container_name).await;
 
                 match status.as_str() {
-                    "exited" => self.restart_exited_app(pool, &app.name).await,
+                    "exited" => {
+                        self.restart_exited_app(pool, app.project_id, &app.name, &container_name)
+                            .await
+                    }
                     "unknown" => self.recreate_missing_app(pool, &app).await,
                     _ => {}
                 }
@@ -496,30 +619,36 @@ impl Scheduler {
         }
     }
 
-    async fn ensure_paas_net(&self) {
-        if self.docker.inspect_network("paas-net", None).await.is_ok() {
+    pub async fn ensure_network(&self, network_name: &str) {
+        if self
+            .docker
+            .inspect_network(network_name, None)
+            .await
+            .is_ok()
+        {
             return;
         }
         let _ = self
             .docker
             .create_network(NetworkCreateRequest {
-                name: "paas-net".to_string(),
+                name: network_name.to_string(),
                 ..Default::default()
             })
             .await;
     }
 
-    pub async fn ensure_container_on_paas_net(
+    pub async fn ensure_container_on_network(
         &self,
+        network_name: &str,
         container_name: &str,
     ) -> Result<(), bollard::errors::Error> {
-        self.ensure_paas_net().await;
+        self.ensure_network(network_name).await;
 
         let container = self.docker.inspect_container(container_name, None).await?;
         let already_connected = container
             .network_settings
             .and_then(|settings| settings.networks)
-            .is_some_and(|networks| networks.contains_key("paas-net"));
+            .is_some_and(|networks| networks.contains_key(network_name));
 
         if already_connected {
             return Ok(());
@@ -527,7 +656,7 @@ impl Scheduler {
 
         self.docker
             .connect_network(
-                "paas-net",
+                network_name,
                 NetworkConnectRequest {
                     container: container_name.to_string(),
                     ..Default::default()
@@ -538,14 +667,15 @@ impl Scheduler {
 
     async fn create_and_start(
         &self,
-        app_name: &str,
+        container_name: &str,
+        network_name: &str,
         image: &str,
         internal_port: u16,
         host_port: u16,
         labels: HashMap<String, String>,
         env_vars: Vec<String>,
     ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
-        self.ensure_paas_net().await;
+        self.ensure_network(network_name).await;
         let port_key = format!("{}/tcp", internal_port);
         let mut port_bindings: HashMap<String, Option<Vec<PortBinding>>> = HashMap::new();
         port_bindings.insert(
@@ -560,7 +690,7 @@ impl Scheduler {
             .create_container(
                 Some(
                     CreateContainerOptionsBuilder::default()
-                        .name(app_name)
+                        .name(container_name)
                         .build(),
                 ),
                 ContainerCreateBody {
@@ -577,7 +707,7 @@ impl Scheduler {
                     }),
                     labels: Some(labels),
                     networking_config: Some(bollard::models::NetworkingConfig {
-                        endpoints_config: Some(paas_net()),
+                        endpoints_config: Some(project_net(network_name)),
                     }),
                     ..Default::default()
                 },
@@ -586,14 +716,14 @@ impl Scheduler {
 
         self.docker
             .start_container(
-                app_name,
+                container_name,
                 Some(StartContainerOptionsBuilder::default().build()),
             )
             .await?;
 
         let container_id = self
             .docker
-            .inspect_container(app_name, None)
+            .inspect_container(container_name, None)
             .await
             .ok()
             .and_then(|info| info.id)
@@ -605,10 +735,11 @@ impl Scheduler {
     async fn create_and_start_worker(
         &self,
         container_name: &str,
+        network_name: &str,
         image: &str,
         env_vars: Vec<String>,
     ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
-        self.ensure_paas_net().await;
+        self.ensure_network(network_name).await;
 
         self.docker
             .create_container(
@@ -625,7 +756,7 @@ impl Scheduler {
                         Some(env_vars)
                     },
                     networking_config: Some(bollard::models::NetworkingConfig {
-                        endpoints_config: Some(paas_net()),
+                        endpoints_config: Some(project_net(network_name)),
                     }),
                     ..Default::default()
                 },
@@ -652,6 +783,8 @@ impl Scheduler {
 
     pub async fn start_process(
         &self,
+        project_id: Uuid,
+        network_name: &str,
         app_name: &str,
         process_name: &str,
         process_type: &ProcessType,
@@ -662,7 +795,7 @@ impl Scheduler {
         env_vars: Vec<String>,
     ) -> Result<ProcessStartResult, DeployError> {
         let image = self.pull(image).await?;
-        let container_name = process_container_name(app_name, process_name);
+        let container_name = app_process_container_name(project_id, app_name, process_name);
 
         match process_type {
             ProcessType::Web => {
@@ -679,6 +812,7 @@ impl Scheduler {
                 let container_id = self
                     .create_and_start(
                         &container_name,
+                        network_name,
                         &image,
                         internal_port,
                         host_port,
@@ -698,7 +832,7 @@ impl Scheduler {
             }
             ProcessType::Worker => {
                 let container_id = self
-                    .create_and_start_worker(&container_name, &image, env_vars)
+                    .create_and_start_worker(&container_name, network_name, &image, env_vars)
                     .await
                     .map_err(|e| {
                         DeployError::Other(format!("Failed to create/start {container_name}: {e}"))
@@ -716,13 +850,14 @@ impl Scheduler {
     pub async fn start_service(
         &self,
         service_id: &str,
+        network_name: &str,
         image: &str,
         container_port: u16,
         existing_port: Option<u16>,
         env_vars: Vec<String>,
         binds: Vec<String>,
     ) -> Result<(String, u16), Box<dyn std::error::Error + Send + Sync>> {
-        self.ensure_paas_net().await;
+        self.ensure_network(network_name).await;
         self.docker
             .create_image(
                 Some(
@@ -772,7 +907,7 @@ impl Scheduler {
                         ..Default::default()
                     }),
                     networking_config: Some(bollard::models::NetworkingConfig {
-                        endpoints_config: Some(paas_net()),
+                        endpoints_config: Some(project_net(network_name)),
                     }),
                     ..Default::default()
                 },
@@ -849,9 +984,12 @@ impl Scheduler {
     pub async fn deploy(
         &self,
         pool: &PgPool,
+        project_id: Uuid,
+        network_name: &str,
         app_name: &str,
         image: &str,
         internal_port: Option<u16>,
+        env_vars: Vec<String>,
         base_domain: Option<&str>,
     ) -> Result<(), DeployError> {
         let image = self.pull(image).await?;
@@ -863,21 +1001,28 @@ impl Scheduler {
 
         let domain = resolve_domain(base_domain);
         let labels = traefik_labels(app_name, internal_port, &domain, None);
+        let container_name = app_container_name(project_id, app_name);
 
         let container_id = self
             .create_and_start(
-                app_name,
+                &container_name,
+                network_name,
                 &image,
                 internal_port,
                 host_port,
                 labels,
-                vec![format!("PORT={internal_port}")],
+                {
+                    let mut env_vars = env_vars;
+                    env_vars.push(format!("PORT={internal_port}"));
+                    env_vars
+                },
             )
             .await
             .map_err(|e| DeployError::Other(format!("Failed to create/start {app_name}: {e}")))?;
 
-        Registry::upsert(
+        Registry::upsert_in_project(
             pool,
+            project_id,
             app_name,
             &image,
             &container_id,
@@ -895,18 +1040,22 @@ impl Scheduler {
     pub async fn redeploy(
         &self,
         pool: &PgPool,
+        project_id: Uuid,
+        network_name: &str,
         app_name: &str,
         image: &str,
         internal_port: u16,
         host_port: u16,
+        env_vars: Vec<String>,
         base_domain: Option<&str>,
     ) -> Result<(), DeployError> {
         let image = self.pull(image).await?;
+        let container_name = app_container_name(project_id, app_name);
 
         let _ = self
             .docker
             .stop_container(
-                app_name,
+                &container_name,
                 Some(StopContainerOptionsBuilder::default().build()),
             )
             .await;
@@ -914,7 +1063,7 @@ impl Scheduler {
         let _ = self
             .docker
             .remove_container(
-                app_name,
+                &container_name,
                 Some(RemoveContainerOptionsBuilder::default().build()),
             )
             .await;
@@ -924,21 +1073,26 @@ impl Scheduler {
 
         let container_id = self
             .create_and_start(
-                app_name,
+                &container_name,
+                network_name,
                 &image,
                 internal_port,
                 host_port,
                 labels,
-                vec![format!("PORT={internal_port}")],
+                {
+                    let mut env_vars = env_vars;
+                    env_vars.push(format!("PORT={internal_port}"));
+                    env_vars
+                },
             )
             .await
             .map_err(|e| DeployError::Other(format!("Failed to recreate {app_name}: {e}")))?;
 
-        Registry::update_container_id(pool, app_name, &container_id)
+        Registry::update_container_id(pool, project_id, app_name, &container_id)
             .await
             .map_err(|e| DeployError::Other(format!("Failed to update container_id: {e}")))?;
 
-        Registry::update_status(pool, app_name, "running")
+        Registry::update_status(pool, project_id, app_name, "running")
             .await
             .map_err(|e| {
                 DeployError::Other(format!("Failed to update status for {app_name}: {e}"))
@@ -950,13 +1104,15 @@ impl Scheduler {
     pub async fn rolling_update(
         &self,
         pool: &PgPool,
+        project_id: Uuid,
+        network_name: &str,
         name: &str,
         new_image: &str,
         internal_port: Option<u16>,
         env: Vec<String>,
         base_domain: Option<&str>,
     ) -> Result<(), DeployError> {
-        let existing = Registry::get(pool, name)
+        let existing = Registry::get_in_project(pool, project_id, name)
             .await
             .map_err(|e| DeployError::Other(format!("Failed to load app {name}: {e}")))?
             .ok_or_else(|| DeployError::AppNotFound(format!("app not found: {name}")))?;
@@ -969,7 +1125,8 @@ impl Scheduler {
             .unwrap_or_default()
             .as_secs()
             .to_string();
-        let canary_name = format!("{name}-canary-{version}");
+        let app_container = app_container_name(project_id, name);
+        let canary_name = format!("{app_container}-canary-{version}");
 
         let canary_port = find_free_port().map_err(|e| {
             DeployError::Other(format!("Failed to find canary port for {name}: {e}"))
@@ -984,7 +1141,7 @@ impl Scheduler {
             }]),
         );
 
-        self.ensure_paas_net().await;
+        self.ensure_network(network_name).await;
         self.docker
             .create_container(
                 Some(
@@ -1005,7 +1162,7 @@ impl Scheduler {
                         ..Default::default()
                     }),
                     networking_config: Some(bollard::models::NetworkingConfig {
-                        endpoints_config: Some(paas_net()),
+                        endpoints_config: Some(project_net(network_name)),
                     }),
                     ..Default::default()
                 },
@@ -1065,7 +1222,7 @@ impl Scheduler {
 
         // Release the app name without stopping the old container. Its Traefik labels
         // remain active while the replacement starts under the production name.
-        let old_name = format!("{name}-old-{version}");
+        let old_name = format!("{app_container}-old-{version}");
         let final_port = match find_free_port() {
             Ok(port) => port,
             Err(e) => {
@@ -1097,7 +1254,7 @@ impl Scheduler {
         if let Err(e) = self
             .docker
             .rename_container(
-                name,
+                &app_container,
                 RenameContainerOptionsBuilder::default()
                     .name(&old_name)
                     .build(),
@@ -1125,7 +1282,8 @@ impl Scheduler {
 
         let final_id = match self
             .create_and_start(
-                name,
+                &app_container,
+                network_name,
                 &image,
                 internal_port,
                 final_port,
@@ -1139,7 +1297,7 @@ impl Scheduler {
                 let _ = self
                     .docker
                     .remove_container(
-                        name,
+                        &app_container,
                         Some(RemoveContainerOptionsBuilder::default().force(true).build()),
                     )
                     .await;
@@ -1147,7 +1305,9 @@ impl Scheduler {
                     .docker
                     .rename_container(
                         &old_name,
-                        RenameContainerOptionsBuilder::default().name(name).build(),
+                        RenameContainerOptionsBuilder::default()
+                            .name(&app_container)
+                            .build(),
                     )
                     .await;
                 let _ = self
@@ -1188,7 +1348,7 @@ impl Scheduler {
             let _ = self
                 .docker
                 .remove_container(
-                    name,
+                    &app_container,
                     Some(RemoveContainerOptionsBuilder::default().force(true).build()),
                 )
                 .await;
@@ -1196,7 +1356,9 @@ impl Scheduler {
                 .docker
                 .rename_container(
                     &old_name,
-                    RenameContainerOptionsBuilder::default().name(name).build(),
+                    RenameContainerOptionsBuilder::default()
+                        .name(&app_container)
+                        .build(),
                 )
                 .await;
             let _ = self
@@ -1221,8 +1383,9 @@ impl Scheduler {
 
         let mut registry_error = None;
         for attempt in 1..=3 {
-            match Registry::upsert(
+            match Registry::upsert_in_project(
                 pool,
+                project_id,
                 name,
                 &image,
                 &final_id,
@@ -1249,7 +1412,7 @@ impl Scheduler {
             let _ = self
                 .docker
                 .remove_container(
-                    name,
+                    &app_container,
                     Some(RemoveContainerOptionsBuilder::default().force(true).build()),
                 )
                 .await;
@@ -1257,7 +1420,9 @@ impl Scheduler {
                 .docker
                 .rename_container(
                     &old_name,
-                    RenameContainerOptionsBuilder::default().name(name).build(),
+                    RenameContainerOptionsBuilder::default()
+                        .name(&app_container)
+                        .build(),
                 )
                 .await;
             let _ = self

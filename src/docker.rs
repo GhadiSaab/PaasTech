@@ -120,13 +120,18 @@ pub fn connection_env_vars_for_service(
             let db = service_env
                 .get("POSTGRES_DB")
                 .map_or("postgres", String::as_str);
+            let base_url = format!(
+                "postgresql://{}:{}@{}:{}/{}",
+                user, password, service_host, service_port, db
+            );
             vec![
                 ("POSTGRES_HOST".into(), host.clone()),
                 ("POSTGRES_PORT".into(), port_str),
+                ("DATABASE_URL".into(), base_url.clone()),
                 (
-                    "DATABASE_URL".into(),
+                    "DATABASE_ASYNC_URL".into(),
                     format!(
-                        "postgresql://{}:{}@{}:{}/{}",
+                        "postgresql+asyncpg://{}:{}@{}:{}/{}",
                         user, password, service_host, service_port, db
                     ),
                 ),

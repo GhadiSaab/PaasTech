@@ -29,6 +29,17 @@ impl ProcessType {
     }
 }
 
+impl TryFrom<String> for ProcessType {
+    type Error = String;
+    fn try_from(s: String) -> Result<Self, Self::Error> {
+        match s.as_str() {
+            "web" => Ok(Self::Web),
+            "worker" => Ok(Self::Worker),
+            other => Err(format!("unknown process type: {other}")),
+        }
+    }
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct ProcessDefinition {
     pub name: String,
@@ -79,10 +90,6 @@ pub async fn save_multipart_file(mut payload: Multipart) -> Result<MultipartData
     Ok(MultipartData { file_path, fields })
 }
 
-pub fn process_container_name(app_name: &str, process_name: &str) -> String {
-    format!("{app_name}-{process_name}")
-}
-
 pub fn load_process_definitions(
     root: &Path,
     fallback_port: Option<u16>,
@@ -90,14 +97,16 @@ pub fn load_process_definitions(
     let manifest_path = root.join("paastech.toml");
 
     if !manifest_path.is_file() {
-        return Ok(vec![ProcessDefinition {
+        let fallback = ProcessDefinition {
             name: "web".to_string(),
             process_type: ProcessType::Web,
             path: ".".to_string(),
             port: fallback_port,
             public_host: None,
             build_env: HashMap::new(),
-        }]);
+        };
+        validate_process_definition(root, &fallback)?;
+        return Ok(vec![fallback]);
     }
 
     let manifest = std::fs::read_to_string(&manifest_path)
@@ -109,7 +118,14 @@ pub fn load_process_definitions(
         return Err("paastech.toml must declare at least one process".to_string());
     }
 
+    let mut seen_names = std::collections::HashSet::new();
     for process in &manifest.processes {
+        if !seen_names.insert(process.name.as_str()) {
+            return Err(format!(
+                "paastech.toml contains duplicate process name '{}'",
+                process.name
+            ));
+        }
         validate_process_definition(root, process)?;
     }
 
@@ -164,8 +180,14 @@ fn validate_process_definition(root: &Path, process: &ProcessDefinition) -> Resu
         validate_public_host(&process.name, public_host)?;
     }
 
-    for key in process.build_env.keys() {
+    for (key, value) in &process.build_env {
         validate_env_key(&process.name, key)?;
+        if value.contains('\n') || value.contains('\0') {
+            return Err(format!(
+                "process '{}' build_env key '{}' value must not contain newlines or null bytes",
+                process.name, key
+            ));
+        }
     }
 
     Ok(())

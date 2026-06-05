@@ -2,15 +2,14 @@ mod commands;
 
 use clap::{CommandFactory, Parser, Subcommand};
 use clap_complete::{Shell, generate};
-use commands::{apps, resources};
+use commands::{apps, projects, resources};
 use std::io;
 
 #[derive(Parser)]
 #[command(
     name = "paastech",
     about = "PaasTech CLI — deploy and manage your apps",
-    version,
-    propagate_version = true
+    version
 )]
 struct Cli {
     #[command(subcommand)]
@@ -19,6 +18,16 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
+    /// Initialize a project in the current directory
+    Init {
+        /// Project name
+        name: String,
+    },
+    /// Manage the active project
+    Project {
+        #[command(subcommand)]
+        command: ProjectCommands,
+    },
     /// Manage applications
     App {
         #[command(subcommand)]
@@ -35,6 +44,30 @@ enum Commands {
         #[arg(value_enum)]
         shell: Shell,
     },
+}
+
+#[derive(Subcommand)]
+enum ProjectCommands {
+    /// Show active project info
+    Info,
+    /// List projects
+    List,
+    /// Manage project environment variables
+    Env {
+        #[command(subcommand)]
+        command: ProjectEnvCommands,
+    },
+}
+
+#[derive(Subcommand)]
+enum ProjectEnvCommands {
+    /// Set an environment variable (format: KEY=VALUE)
+    Set {
+        /// Key=Value pair
+        pair: String,
+    },
+    /// List environment variables
+    List,
 }
 
 #[derive(Subcommand)]
@@ -211,6 +244,15 @@ async fn main() {
     let cli = Cli::parse();
 
     let result = match cli.command {
+        Commands::Init { name } => projects::init(&name).await,
+        Commands::Project { command } => match command {
+            ProjectCommands::Info => projects::info().await,
+            ProjectCommands::List => projects::list().await,
+            ProjectCommands::Env { command } => match command {
+                ProjectEnvCommands::Set { pair } => projects::env_set(&pair).await,
+                ProjectEnvCommands::List => projects::env_list().await,
+            },
+        },
         Commands::Completion { shell } => {
             generate(shell, &mut Cli::command(), "paastech", &mut io::stdout());
             return;

@@ -1,10 +1,16 @@
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
+#[derive(Deserialize, ToSchema)]
+pub struct CreateProjectPayload {
+    pub name: String,
+}
+
 // Resource models
-#[derive(Serialize, Deserialize, ToSchema)]
+#[derive(Serialize, Deserialize, sqlx::FromRow, ToSchema)]
 pub struct Resource {
     pub id: String,
+    pub project_id: String,
     pub display_name: String,
     pub name: String,
     pub version: String,
