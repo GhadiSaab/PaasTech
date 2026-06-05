@@ -81,15 +81,19 @@ fn build_traefik_labels(
     internal_port: u16,
     version: &str,
     base_domain: &str,
+    public_host: Option<&str>,
 ) -> HashMap<String, String> {
     let service_name = format!("{app_name}-{version}");
     let router_name = &service_name;
+    let host = public_host
+        .map(str::to_string)
+        .unwrap_or_else(|| format!("{app_name}.{base_domain}"));
 
     let mut labels = HashMap::new();
     labels.insert("traefik.enable".to_string(), "true".to_string());
     labels.insert(
         format!("traefik.http.routers.{router_name}.rule"),
-        format!("Host(`{app_name}.{base_domain}`)"),
+        format!("Host(`{host}`)"),
     );
     labels.insert(
         format!("traefik.http.routers.{router_name}.service"),
@@ -106,13 +110,14 @@ fn traefik_labels(
     app_name: &str,
     internal_port: u16,
     base_domain: &str,
+    public_host: Option<&str>,
 ) -> HashMap<String, String> {
     let version = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs()
         .to_string();
-    build_traefik_labels(app_name, internal_port, &version, base_domain)
+    build_traefik_labels(app_name, internal_port, &version, base_domain, public_host)
 }
 
 fn resolve_domain(base_domain: Option<&str>) -> String {
@@ -625,6 +630,7 @@ impl Scheduler {
         image: &str,
         internal_port: Option<u16>,
         base_domain: Option<&str>,
+        public_host: Option<&str>,
         env_vars: Vec<String>,
     ) -> Result<ProcessStartResult, DeployError> {
         let image = self.pull(image).await?;
@@ -639,7 +645,7 @@ impl Scheduler {
                     ))
                 })?;
                 let domain = resolve_domain(base_domain);
-                let labels = traefik_labels(app_name, internal_port, &domain);
+                let labels = traefik_labels(app_name, internal_port, &domain, public_host);
                 let mut env_vars = env_vars;
                 env_vars.push(format!("PORT={internal_port}"));
                 let container_id = self
@@ -828,7 +834,7 @@ impl Scheduler {
         })?;
 
         let domain = resolve_domain(base_domain);
-        let labels = traefik_labels(app_name, internal_port, &domain);
+        let labels = traefik_labels(app_name, internal_port, &domain, None);
 
         let container_id = self
             .create_and_start(
@@ -886,7 +892,7 @@ impl Scheduler {
             .await;
 
         let domain = resolve_domain(base_domain);
-        let labels = traefik_labels(app_name, internal_port, &domain);
+        let labels = traefik_labels(app_name, internal_port, &domain, None);
 
         let container_id = self
             .create_and_start(
@@ -1054,7 +1060,7 @@ impl Scheduler {
                 )));
             }
         };
-        let mut labels = build_traefik_labels(name, internal_port, &version, &domain);
+        let mut labels = build_traefik_labels(name, internal_port, &version, &domain, None);
         let router_name = format!("{name}-{version}");
         labels.insert(
             format!("traefik.http.routers.{router_name}.priority"),
@@ -1309,7 +1315,7 @@ mod tests {
 
     #[test]
     fn build_traefik_labels_uses_versioned_router_and_service_names() {
-        let labels = build_traefik_labels("api", 8080, "123", "example.com");
+        let labels = build_traefik_labels("api", 8080, "123", "example.com", None);
 
         assert_eq!(
             labels.get("traefik.http.routers.api-123.rule"),
@@ -1325,6 +1331,22 @@ mod tests {
         );
         assert!(!labels.contains_key("traefik.http.routers.api.rule"));
         assert!(!labels.contains_key("traefik.http.routers.api.service"));
+    }
+
+    #[test]
+    fn build_traefik_labels_can_use_public_host() {
+        let labels = build_traefik_labels(
+            "api",
+            8080,
+            "123",
+            "example.com",
+            Some("api.datachef.localhost"),
+        );
+
+        assert_eq!(
+            labels.get("traefik.http.routers.api-123.rule"),
+            Some(&"Host(`api.datachef.localhost`)".to_string())
+        );
     }
 
     #[test]

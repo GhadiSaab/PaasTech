@@ -37,6 +37,8 @@ CREATE TABLE IF NOT EXISTS application_processes (
     name VARCHAR(50) NOT NULL,
     process_type VARCHAR(20) NOT NULL,
     build_context TEXT NOT NULL,
+    public_host VARCHAR(255) NULL,
+    build_env JSONB NULL,
     image_id varchar(128) NULL,
     container_id varchar(128) NULL,
     internal_port INTEGER NULL,
