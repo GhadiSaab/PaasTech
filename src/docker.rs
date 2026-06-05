@@ -103,11 +103,12 @@ pub fn default_env_vars_for_service(name: &str) -> Vec<(String, String)> {
 
 pub fn connection_env_vars_for_service(
     name: &str,
-    host_port: u16,
+    service_host: &str,
+    service_port: u16,
     service_env: &HashMap<String, String>,
 ) -> Vec<(String, String)> {
-    let localhost = "localhost".to_string();
-    let port_str = host_port.to_string();
+    let host = service_host.to_string();
+    let port_str = service_port.to_string();
     match name {
         "postgres" => {
             let user = service_env
@@ -120,13 +121,13 @@ pub fn connection_env_vars_for_service(
                 .get("POSTGRES_DB")
                 .map_or("postgres", String::as_str);
             vec![
-                ("POSTGRES_HOST".into(), localhost),
+                ("POSTGRES_HOST".into(), host.clone()),
                 ("POSTGRES_PORT".into(), port_str),
                 (
                     "DATABASE_URL".into(),
                     format!(
-                        "postgresql://{}:{}@localhost:{}/{}",
-                        user, password, host_port, db
+                        "postgresql://{}:{}@{}:{}/{}",
+                        user, password, service_host, service_port, db
                     ),
                 ),
             ]
@@ -134,24 +135,24 @@ pub fn connection_env_vars_for_service(
         "redis" => {
             let password = service_env.get("REDIS_PASSWORD").map_or("", String::as_str);
             vec![
-                ("REDIS_HOST".into(), localhost),
+                ("REDIS_HOST".into(), host.clone()),
                 ("REDIS_PORT".into(), port_str),
                 (
                     "REDIS_URL".into(),
-                    format!("redis://:{}@localhost:{}", password, host_port),
+                    format!("redis://:{}@{}:{}", password, service_host, service_port),
                 ),
             ]
         }
         "s3" => vec![
-            ("S3_HOST".into(), localhost),
+            ("S3_HOST".into(), host.clone()),
             ("S3_PORT".into(), port_str),
             (
                 "S3_ENDPOINT_URL".into(),
-                format!("http://localhost:{}", host_port),
+                format!("http://{}:{}", service_host, service_port),
             ),
         ],
         _ => vec![
-            (format!("{}_HOST", name.to_uppercase()), localhost),
+            (format!("{}_HOST", name.to_uppercase()), host),
             (format!("{}_PORT", name.to_uppercase()), port_str),
         ],
     }

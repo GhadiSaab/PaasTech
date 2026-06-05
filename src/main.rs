@@ -16,7 +16,7 @@ use docker::{
 use reqwest::Client;
 use serde::Deserialize;
 use serde_json::json;
-use sqlx::PgPool;
+use sqlx::{PgPool, Row};
 use std::collections::HashMap;
 use tokio::fs;
 use utoipa::OpenApi;
@@ -934,10 +934,13 @@ async fn inject_service_env_into_app(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     app_uuid: Uuid,
     service_name: &str,
-    host_port: u16,
+    service_host: &str,
+    service_port: u16,
     service_env: &HashMap<String, String>,
 ) -> Result<(), sqlx::Error> {
-    for (key, value) in connection_env_vars_for_service(service_name, host_port, service_env) {
+    for (key, value) in
+        connection_env_vars_for_service(service_name, service_host, service_port, service_env)
+    {
         sqlx::query!(
             "INSERT INTO application_env_vars (application_id, key, value) VALUES ($1, $2, $3) ON CONFLICT (application_id, key) DO UPDATE SET value = EXCLUDED.value",
             app_uuid,
@@ -947,6 +950,78 @@ async fn inject_service_env_into_app(
         .execute(&mut **tx)
         .await?;
     }
+    Ok(())
+}
+
+async fn ensure_attached_service_network(
+    pool: &PgPool,
+    scheduler: &Scheduler,
+    service_id: Uuid,
+    app_ids: &[Uuid],
+) -> Result<(), Error> {
+    scheduler
+        .ensure_container_on_paas_net(&service_id.to_string())
+        .await
+        .map_err(|e| {
+            error::ErrorInternalServerError(format!(
+                "Failed to connect service {service_id} to paas-net: {e}"
+            ))
+        })?;
+
+    for app_id in app_ids {
+        let Some(app) = sqlx::query_as::<_, registry::App>(
+            r#"
+            SELECT id, name, image_id, container_id, internal_port, port, status, base_domain, created_at
+            FROM applications
+            WHERE id = $1
+            "#,
+        )
+        .bind(app_id)
+        .fetch_optional(pool)
+        .await
+        .map_err(error::ErrorInternalServerError)?
+        else {
+            continue;
+        };
+
+        let processes = Registry::list_processes(pool, app.id)
+            .await
+            .map_err(error::ErrorInternalServerError)?;
+
+        if processes.is_empty() {
+            if app.container_id.as_deref().is_some_and(|id| !id.is_empty()) {
+                scheduler
+                    .ensure_container_on_paas_net(&app.name)
+                    .await
+                    .map_err(|e| {
+                        error::ErrorInternalServerError(format!(
+                            "Failed to connect {} to paas-net: {e}",
+                            app.name
+                        ))
+                    })?;
+            }
+            continue;
+        }
+
+        for process in processes {
+            if process
+                .container_id
+                .as_deref()
+                .is_some_and(|id| !id.is_empty())
+            {
+                let container_name = process_container_name(&app.name, &process.name);
+                scheduler
+                    .ensure_container_on_paas_net(&container_name)
+                    .await
+                    .map_err(|e| {
+                        error::ErrorInternalServerError(format!(
+                            "Failed to connect {container_name} to paas-net: {e}"
+                        ))
+                    })?;
+            }
+        }
+    }
+
     Ok(())
 }
 
@@ -1243,7 +1318,8 @@ async fn create_resource(
             &mut tx,
             app_uuid,
             &payload.name,
-            host_port,
+            &id.to_string(),
+            container_port,
             &service_env_map,
         )
         .await
@@ -1251,6 +1327,14 @@ async fn create_resource(
     }
 
     tx.commit().await.map_err(error::ErrorInternalServerError)?;
+
+    if let Some(app_id) = &payload.application_id
+        && !app_id.is_empty()
+    {
+        let app_uuid = Uuid::parse_str(app_id)
+            .map_err(|_| error::ErrorBadRequest("Invalid application_id"))?;
+        ensure_attached_service_network(pool.get_ref(), &scheduler, id, &[app_uuid]).await?;
+    }
 
     Ok(HttpResponse::Created().json(Resource {
         id: id.to_string(),
@@ -1357,6 +1441,7 @@ async fn get_resource(
 async fn update_resource(
     pool: web::Data<PgPool>,
     client: web::Data<Client>,
+    scheduler: web::Data<Scheduler>,
     id: web::Path<String>,
     payload: web::Json<UpdateResourcePayload>,
 ) -> Result<impl Responder, Error> {
@@ -1397,6 +1482,8 @@ async fn update_resource(
         return Err(error::ErrorNotFound("Resource not found"));
     }
 
+    let mut attached_app_uuids = Vec::new();
+
     if let Some(app_ids) = &payload.application_ids {
         let app_uuids: Vec<Uuid> = app_ids
             .iter()
@@ -1404,6 +1491,7 @@ async fn update_resource(
                 Uuid::parse_str(s).map_err(|_| error::ErrorBadRequest("Invalid application_id"))
             })
             .collect::<Result<_, _>>()?;
+        attached_app_uuids = app_uuids.clone();
 
         sqlx::query!(
             "DELETE FROM application_services WHERE service_id = $1",
@@ -1424,12 +1512,20 @@ async fn update_resource(
             .map_err(error::ErrorInternalServerError)?;
         }
 
-        let service_info = sqlx::query!("SELECT name, port FROM services WHERE id = $1", uuid)
+        let service_info = sqlx::query("SELECT name, container_id FROM services WHERE id = $1")
+            .bind(uuid)
             .fetch_one(&mut *tx)
             .await
             .map_err(error::ErrorInternalServerError)?;
 
-        if let Some(port) = service_info.port {
+        let service_name: String = service_info
+            .try_get("name")
+            .map_err(error::ErrorInternalServerError)?;
+        let container_id: Option<String> = service_info
+            .try_get("container_id")
+            .map_err(error::ErrorInternalServerError)?;
+
+        if container_id.is_some() {
             let service_env: HashMap<String, String> = sqlx::query!(
                 "SELECT key, value FROM service_env_vars WHERE service_id = $1 ORDER BY key",
                 uuid
@@ -1440,13 +1536,15 @@ async fn update_resource(
             .into_iter()
             .map(|r| (r.key, r.value))
             .collect();
+            let service_port = service_port_for_service(&service_name);
 
             for &app_uuid in &app_uuids {
                 inject_service_env_into_app(
                     &mut tx,
                     app_uuid,
-                    &service_info.name,
-                    port as u16,
+                    &service_name,
+                    &uuid.to_string(),
+                    service_port,
                     &service_env,
                 )
                 .await
@@ -1456,6 +1554,11 @@ async fn update_resource(
     }
 
     tx.commit().await.map_err(error::ErrorInternalServerError)?;
+
+    if !attached_app_uuids.is_empty() {
+        ensure_attached_service_network(pool.get_ref(), &scheduler, uuid, &attached_app_uuids)
+            .await?;
+    }
 
     Ok(HttpResponse::Ok().body("Resource successfully updated"))
 }
