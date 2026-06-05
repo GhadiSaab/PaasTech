@@ -15,6 +15,7 @@ use sqlx::PgPool;
 use std::collections::HashMap;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use crate::engine::{ProcessType, process_container_name};
 use crate::registry::{App, Registry};
 
 #[derive(Debug)]
@@ -132,6 +133,12 @@ pub struct ContainerInfo {
     pub id: String,
     pub image: String,
     pub name: String,
+}
+
+pub struct ProcessStartResult {
+    pub container_id: String,
+    pub internal_port: Option<u16>,
+    pub host_port: Option<u16>,
 }
 
 #[allow(dead_code)]
@@ -258,6 +265,40 @@ impl Scheduler {
         }
     }
 
+    async fn restart_exited_process(
+        &self,
+        pool: &PgPool,
+        process_id: uuid::Uuid,
+        container_name: &str,
+    ) {
+        println!("watch: process {container_name} crashed, restarting");
+        if let Err(e) = Registry::update_process_status(pool, process_id, "crashed").await {
+            eprintln!("watch: failed to update process {container_name}: {e}");
+        }
+
+        match self.restart(container_name).await {
+            Ok(()) => {
+                if self
+                    .wait_until_running(container_name, Duration::from_secs(10))
+                    .await
+                {
+                    if let Err(e) =
+                        Registry::update_process_status(pool, process_id, "running").await
+                    {
+                        eprintln!("watch: failed to update process {container_name}: {e}");
+                    }
+                } else {
+                    eprintln!(
+                        "watch: process {container_name} did not reach running after restart"
+                    );
+                }
+            }
+            Err(e) => {
+                eprintln!("watch: failed to restart process {container_name}: {e}");
+            }
+        }
+    }
+
     async fn recreate_missing_app(&self, pool: &PgPool, app: &App) {
         println!("watch: app {} container is missing, recreating", app.name);
         Self::mark_app_status(pool, &app.name, "crashed").await;
@@ -327,6 +368,33 @@ impl Scheduler {
         loop {
             sleep(Duration::from_secs(5)).await;
 
+            match Registry::list_active_processes(pool).await {
+                Ok(processes) => {
+                    for process in processes {
+                        let container_name =
+                            process_container_name(&process.app_name, &process.process_name);
+                        let status = self.inspect(&container_name).await;
+
+                        match status.as_str() {
+                            "exited" => {
+                                self.restart_exited_process(pool, process.id, &container_name)
+                                    .await;
+                            }
+                            "unknown" => {
+                                eprintln!(
+                                    "watch: process {container_name} is missing and needs recreation"
+                                );
+                                let _ =
+                                    Registry::update_process_status(pool, process.id, "crashed")
+                                        .await;
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+                Err(e) => eprintln!("watch: failed to list app processes: {e}"),
+            }
+
             let apps = match Registry::list(pool).await {
                 Ok(apps) => apps,
                 Err(e) => {
@@ -336,6 +404,15 @@ impl Scheduler {
             };
 
             for app in apps {
+                match Registry::list_processes(pool, app.id).await {
+                    Ok(processes) if !processes.is_empty() => continue,
+                    Ok(_) => {}
+                    Err(e) => {
+                        eprintln!("watch: failed to list processes for {}: {e}", app.name);
+                        continue;
+                    }
+                }
+
                 let should_be_running =
                     matches!(app.status.as_deref(), Some("running") | Some("crashed"));
                 if !should_be_running {
@@ -433,6 +510,7 @@ impl Scheduler {
         internal_port: u16,
         host_port: u16,
         labels: HashMap<String, String>,
+        env_vars: Vec<String>,
     ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
         self.ensure_paas_net().await;
         let port_key = format!("{}/tcp", internal_port);
@@ -454,7 +532,11 @@ impl Scheduler {
                 ),
                 ContainerCreateBody {
                     image: Some(image.to_string()),
-                    env: Some(vec![format!("PORT={internal_port}")]),
+                    env: if env_vars.is_empty() {
+                        None
+                    } else {
+                        Some(env_vars)
+                    },
                     exposed_ports: Some(vec![port_key]),
                     host_config: Some(HostConfig {
                         port_bindings: Some(port_bindings),
@@ -485,6 +567,116 @@ impl Scheduler {
             .unwrap_or_default();
 
         Ok(container_id)
+    }
+
+    async fn create_and_start_worker(
+        &self,
+        container_name: &str,
+        image: &str,
+        env_vars: Vec<String>,
+    ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+        self.ensure_paas_net().await;
+
+        self.docker
+            .create_container(
+                Some(
+                    CreateContainerOptionsBuilder::default()
+                        .name(container_name)
+                        .build(),
+                ),
+                ContainerCreateBody {
+                    image: Some(image.to_string()),
+                    env: if env_vars.is_empty() {
+                        None
+                    } else {
+                        Some(env_vars)
+                    },
+                    networking_config: Some(bollard::models::NetworkingConfig {
+                        endpoints_config: Some(paas_net()),
+                    }),
+                    ..Default::default()
+                },
+            )
+            .await?;
+
+        self.docker
+            .start_container(
+                container_name,
+                Some(StartContainerOptionsBuilder::default().build()),
+            )
+            .await?;
+
+        let container_id = self
+            .docker
+            .inspect_container(container_name, None)
+            .await
+            .ok()
+            .and_then(|info| info.id)
+            .unwrap_or_default();
+
+        Ok(container_id)
+    }
+
+    pub async fn start_process(
+        &self,
+        app_name: &str,
+        process_name: &str,
+        process_type: &ProcessType,
+        image: &str,
+        internal_port: Option<u16>,
+        base_domain: Option<&str>,
+        env_vars: Vec<String>,
+    ) -> Result<ProcessStartResult, DeployError> {
+        let image = self.pull(image).await?;
+        let container_name = process_container_name(app_name, process_name);
+
+        match process_type {
+            ProcessType::Web => {
+                let internal_port = self.resolve_internal_port(&image, internal_port).await?;
+                let host_port = find_free_port().map_err(|e| {
+                    DeployError::Other(format!(
+                        "Failed to find free port for {container_name}: {e}"
+                    ))
+                })?;
+                let domain = resolve_domain(base_domain);
+                let labels = traefik_labels(app_name, internal_port, &domain);
+                let mut env_vars = env_vars;
+                env_vars.push(format!("PORT={internal_port}"));
+                let container_id = self
+                    .create_and_start(
+                        &container_name,
+                        &image,
+                        internal_port,
+                        host_port,
+                        labels,
+                        env_vars,
+                    )
+                    .await
+                    .map_err(|e| {
+                        DeployError::Other(format!("Failed to create/start {container_name}: {e}"))
+                    })?;
+
+                Ok(ProcessStartResult {
+                    container_id,
+                    internal_port: Some(internal_port),
+                    host_port: Some(host_port),
+                })
+            }
+            ProcessType::Worker => {
+                let container_id = self
+                    .create_and_start_worker(&container_name, &image, env_vars)
+                    .await
+                    .map_err(|e| {
+                        DeployError::Other(format!("Failed to create/start {container_name}: {e}"))
+                    })?;
+
+                Ok(ProcessStartResult {
+                    container_id,
+                    internal_port: None,
+                    host_port: None,
+                })
+            }
+        }
     }
 
     pub async fn start_service(
@@ -639,7 +831,14 @@ impl Scheduler {
         let labels = traefik_labels(app_name, internal_port, &domain);
 
         let container_id = self
-            .create_and_start(app_name, &image, internal_port, host_port, labels)
+            .create_and_start(
+                app_name,
+                &image,
+                internal_port,
+                host_port,
+                labels,
+                vec![format!("PORT={internal_port}")],
+            )
             .await
             .map_err(|e| DeployError::Other(format!("Failed to create/start {app_name}: {e}")))?;
 
@@ -690,7 +889,14 @@ impl Scheduler {
         let labels = traefik_labels(app_name, internal_port, &domain);
 
         let container_id = self
-            .create_and_start(app_name, &image, internal_port, host_port, labels)
+            .create_and_start(
+                app_name,
+                &image,
+                internal_port,
+                host_port,
+                labels,
+                vec![format!("PORT={internal_port}")],
+            )
             .await
             .map_err(|e| DeployError::Other(format!("Failed to recreate {app_name}: {e}")))?;
 
@@ -884,7 +1090,14 @@ impl Scheduler {
         }
 
         let final_id = match self
-            .create_and_start(name, &image, internal_port, final_port, labels)
+            .create_and_start(
+                name,
+                &image,
+                internal_port,
+                final_port,
+                labels,
+                vec![format!("PORT={internal_port}")],
+            )
             .await
         {
             Ok(id) => id,

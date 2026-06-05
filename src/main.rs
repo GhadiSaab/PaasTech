@@ -23,7 +23,10 @@ use utoipa::OpenApi;
 use utoipa_swagger_ui::SwaggerUi;
 use uuid::Uuid;
 
-use crate::engine::{MultipartData, build_image, extract_zip, save_multipart_file};
+use crate::engine::{
+    MultipartData, ProcessType, build_image_with_name, extract_zip, load_process_definitions,
+    process_container_name, save_multipart_file,
+};
 use crate::models::{CreateResourcePayload, Resource, UpdateResourcePayload};
 use crate::registry::Registry;
 use crate::scheduler::{DeployError, Scheduler, find_free_port};
@@ -238,7 +241,15 @@ async fn upload_app(
         .await
         .map_err(error::ErrorInternalServerError)?;
 
-    if let Err(e) = Registry::save(
+    let processes = match load_process_definitions(&extracted_folder, internal_port) {
+        Ok(processes) => processes,
+        Err(e) => {
+            let _ = fs::remove_dir_all(&extracted_folder).await;
+            return Ok(HttpResponse::BadRequest().json(json!({"error": e})));
+        }
+    };
+
+    let app = match Registry::save(
         &pool,
         &name,
         "",
@@ -250,44 +261,115 @@ async fn upload_app(
     )
     .await
     {
-        let _ = fs::remove_dir_all(&extracted_folder).await;
-        return Ok(HttpResponse::InternalServerError().json(json!({"error": e.to_string()})));
+        Ok(app) => app,
+        Err(e) => {
+            let _ = fs::remove_dir_all(&extracted_folder).await;
+            return Ok(HttpResponse::InternalServerError().json(json!({"error": e.to_string()})));
+        }
+    };
+
+    let mut process_rows = Vec::new();
+    for process in &processes {
+        let row = match Registry::create_process(
+            &pool,
+            app.id,
+            &process.name,
+            process.process_type.as_str(),
+            &process.path,
+            process.port.map(|p| p as i32),
+            "building",
+        )
+        .await
+        {
+            Ok(row) => row,
+            Err(e) => {
+                let _ = fs::remove_dir_all(&extracted_folder).await;
+                let _ = Registry::delete(&pool, &name).await;
+                return Ok(
+                    HttpResponse::InternalServerError().json(json!({"error": e.to_string()}))
+                );
+            }
+        };
+        process_rows.push(row);
     }
 
     let pool_bg = pool.clone();
     let scheduler_bg = scheduler.clone();
     let name_bg = name.clone();
     tokio::spawn(async move {
-        let image_name = match build_image(
-            extracted_folder.to_string_lossy().to_string(),
-            scheduler_bg.docker_host(),
-        )
-        .await
-        {
-            Ok(img) => img,
-            Err(e) => {
-                eprintln!("build: failed for {name_bg}: {e}");
-                let _ = fs::remove_dir_all(&extracted_folder).await;
-                let _ = Registry::update_status(&pool_bg, &name_bg, "failed").await;
-                return;
+        let mut failed = false;
+
+        for (process, row) in processes.into_iter().zip(process_rows.into_iter()) {
+            let image_name = format!("{}-{}", name_bg, process.name);
+            let context = extracted_folder.join(&process.path);
+            let env_vars = match Registry::get_app_env(&pool_bg, row.application_id).await {
+                Ok(env_vars) => env_vars,
+                Err(e) => {
+                    eprintln!(
+                        "registry: failed to load env vars for {} process {}: {e}",
+                        name_bg, process.name
+                    );
+                    let _ = Registry::update_process_status(&pool_bg, row.id, "failed").await;
+                    failed = true;
+                    break;
+                }
+            };
+
+            if let Err(e) = build_image_with_name(
+                &image_name,
+                context.to_string_lossy().to_string(),
+                scheduler_bg.docker_host(),
+            )
+            .await
+            {
+                eprintln!(
+                    "build: failed for {} process {}: {e}",
+                    name_bg, process.name
+                );
+                let _ = Registry::update_process_status(&pool_bg, row.id, "failed").await;
+                failed = true;
+                break;
             }
-        };
+
+            match scheduler_bg
+                .start_process(
+                    &name_bg,
+                    &process.name,
+                    &process.process_type,
+                    &image_name,
+                    process.port,
+                    None,
+                    env_vars,
+                )
+                .await
+            {
+                Ok(started) => {
+                    let _ = Registry::update_process_running(
+                        &pool_bg,
+                        row.id,
+                        &image_name,
+                        &started.container_id,
+                        started.internal_port.map(|p| p as i32),
+                        started.host_port.map(|p| p as i32),
+                    )
+                    .await;
+                }
+                Err(e) => {
+                    eprintln!(
+                        "deploy: failed for {} process {}: {e}",
+                        name_bg, process.name
+                    );
+                    let _ = Registry::update_process_status(&pool_bg, row.id, "failed").await;
+                    failed = true;
+                    break;
+                }
+            }
+        }
 
         let _ = fs::remove_dir_all(&extracted_folder).await;
 
-        if let Err(e) = scheduler_bg
-            .deploy(
-                pool_bg.get_ref(),
-                &name_bg,
-                &image_name,
-                internal_port,
-                None,
-            )
-            .await
-        {
-            eprintln!("deploy: failed for {name_bg}: {e}");
-            let _ = Registry::update_status(&pool_bg, &name_bg, "failed").await;
-        }
+        let status = if failed { "failed" } else { "running" };
+        let _ = Registry::update_status(&pool_bg, &name_bg, status).await;
     });
 
     Ok(HttpResponse::Accepted().json(json!({"name": name})))
@@ -429,15 +511,36 @@ async fn stop_app(
     path: web::Path<String>,
 ) -> impl Responder {
     let app_name = path.into_inner();
-    match Registry::get(&pool, &app_name).await {
-        Ok(Some(_)) => {}
+    let app = match Registry::get(&pool, &app_name).await {
+        Ok(Some(app)) => app,
         Ok(None) => return HttpResponse::NotFound().finish(),
         Err(e) => {
             eprintln!("registry: get failed for {app_name}: {e}");
             return HttpResponse::InternalServerError().finish();
         }
+    };
+    match Registry::list_processes(&pool, app.id).await {
+        Ok(processes) if !processes.is_empty() => {
+            for process in processes {
+                scheduler
+                    .stop(&process_container_name(&app_name, &process.name))
+                    .await;
+                if let Err(e) = Registry::update_process_status(&pool, process.id, "stopped").await
+                {
+                    eprintln!(
+                        "registry: failed to update process {} for {app_name}: {e}",
+                        process.name
+                    );
+                }
+            }
+        }
+        Ok(_) => scheduler.stop(&app_name).await,
+        Err(e) => {
+            eprintln!("registry: failed to list processes for {app_name}: {e}");
+            return HttpResponse::InternalServerError().finish();
+        }
     }
-    scheduler.stop(&app_name).await;
+
     if let Err(e) = Registry::update_status(&pool, &app_name, "stopped").await {
         eprintln!("registry: failed to update status for {app_name}: {e}");
     }
@@ -470,6 +573,90 @@ async fn restart_app(
             return HttpResponse::InternalServerError().finish();
         }
     };
+
+    let processes = match Registry::list_processes(&pool, app.id).await {
+        Ok(processes) => processes,
+        Err(e) => {
+            eprintln!("registry: failed to list processes for {app_name}: {e}");
+            return HttpResponse::InternalServerError().finish();
+        }
+    };
+
+    if !processes.is_empty() {
+        for process in processes {
+            let Some(image) = process.image_id.as_deref().filter(|s| !s.is_empty()) else {
+                return HttpResponse::BadRequest().json(json!({
+                    "error": format!("process '{}' has no image_id", process.name)
+                }));
+            };
+            let process_type = match process.process_type.as_str() {
+                "web" => ProcessType::Web,
+                "worker" => ProcessType::Worker,
+                other => {
+                    return HttpResponse::BadRequest()
+                        .json(json!({"error": format!("unknown process type: {other}")}));
+                }
+            };
+
+            scheduler
+                .stop(&process_container_name(&app_name, &process.name))
+                .await;
+
+            let env_vars = match Registry::get_app_env(&pool, app.id).await {
+                Ok(env_vars) => env_vars,
+                Err(e) => {
+                    eprintln!("registry: failed to load env vars for {app_name}: {e}");
+                    return HttpResponse::InternalServerError().finish();
+                }
+            };
+
+            match scheduler
+                .start_process(
+                    &app_name,
+                    &process.name,
+                    &process_type,
+                    image,
+                    process.internal_port.map(|p| p as u16),
+                    app.base_domain.as_deref(),
+                    env_vars,
+                )
+                .await
+            {
+                Ok(started) => {
+                    if let Err(e) = Registry::update_process_running(
+                        &pool,
+                        process.id,
+                        image,
+                        &started.container_id,
+                        started.internal_port.map(|p| p as i32),
+                        started.host_port.map(|p| p as i32),
+                    )
+                    .await
+                    {
+                        eprintln!(
+                            "registry: failed to update process {} for {app_name}: {e}",
+                            process.name
+                        );
+                        return HttpResponse::InternalServerError().finish();
+                    }
+                }
+                Err(e) => {
+                    eprintln!(
+                        "docker: failed to restart process {} for {app_name}: {e}",
+                        process.name
+                    );
+                    let _ = Registry::update_process_status(&pool, process.id, "failed").await;
+                    return HttpResponse::InternalServerError().body(e.to_string());
+                }
+            }
+        }
+
+        if let Err(e) = Registry::update_status(&pool, &app_name, "running").await {
+            eprintln!("registry: failed to update status for {app_name}: {e}");
+        }
+
+        return HttpResponse::Ok().finish();
+    }
 
     let image = match app.image_id.as_deref().filter(|s| !s.is_empty()) {
         Some(img) => img.to_string(),
@@ -541,6 +728,7 @@ async fn status_app(
             return HttpResponse::InternalServerError().finish();
         }
     };
+
     let docker_status = scheduler.inspect(&app_name).await;
     let status = if docker_status == "unknown" {
         app.status.as_deref().unwrap_or("unknown").to_string()
@@ -577,7 +765,20 @@ async fn delete_app(
         }
     };
 
-    scheduler.stop(&app_name).await;
+    match Registry::list_processes(&pool, app.id).await {
+        Ok(processes) if !processes.is_empty() => {
+            for process in processes {
+                scheduler
+                    .stop(&process_container_name(&app_name, &process.name))
+                    .await;
+            }
+        }
+        Ok(_) => scheduler.stop(&app_name).await,
+        Err(e) => {
+            eprintln!("registry: failed to list processes for {app_name}: {e}");
+            return HttpResponse::InternalServerError().finish();
+        }
+    }
 
     let mut tx = match pool.begin().await {
         Ok(tx) => tx,
@@ -617,6 +818,7 @@ async fn delete_app(
 #[derive(Deserialize)]
 struct LogsQuery {
     tail: Option<usize>,
+    process: Option<String>,
 }
 
 #[utoipa::path(
@@ -641,19 +843,45 @@ async fn logs_app(
     query: web::Query<LogsQuery>,
 ) -> impl Responder {
     let app_name = path.into_inner();
-    match Registry::get(&pool, &app_name).await {
-        Ok(Some(_)) => {}
+    let app = match Registry::get(&pool, &app_name).await {
+        Ok(Some(app)) => app,
         Ok(None) => return HttpResponse::NotFound().finish(),
         Err(e) => {
             eprintln!("registry: get failed for {app_name}: {e}");
             return HttpResponse::InternalServerError().finish();
         }
-    }
+    };
 
-    match scheduler.get_logs(&app_name, query.tail).await {
+    let container_name = match Registry::list_processes(&pool, app.id).await {
+        Ok(processes) if !processes.is_empty() => {
+            let selected_name = match query.process.as_deref() {
+                Some(name) => processes
+                    .iter()
+                    .find(|process| process.name == name)
+                    .map(|process| process.name.clone()),
+                None => processes
+                    .iter()
+                    .find(|process| process.process_type == "web")
+                    .or_else(|| processes.first())
+                    .map(|process| process.name.clone()),
+            };
+
+            let Some(process_name) = selected_name else {
+                return HttpResponse::NotFound().body("process not found");
+            };
+            process_container_name(&app_name, &process_name)
+        }
+        Ok(_) => app_name.clone(),
+        Err(e) => {
+            eprintln!("registry: failed to list processes for {app_name}: {e}");
+            return HttpResponse::InternalServerError().finish();
+        }
+    };
+
+    match scheduler.get_logs(&container_name, query.tail).await {
         Ok(logs) => HttpResponse::Ok().content_type("text/plain").body(logs),
         Err(e) => {
-            eprintln!("docker: failed to get logs for {app_name}: {e}");
+            eprintln!("docker: failed to get logs for {container_name}: {e}");
             HttpResponse::InternalServerError().finish()
         }
     }
