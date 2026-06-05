@@ -3,6 +3,7 @@ use crate::api_base;
 use colored::Colorize;
 use serde::Deserialize;
 use serde_json::Value;
+use std::time::Duration;
 
 #[derive(Deserialize)]
 struct App {
@@ -295,7 +296,11 @@ pub async fn upload(source: &str) -> Result<(), String> {
         .ok_or("Server response missing 'name' field")?
         .to_string();
 
-    println!("{} Upload accepted — app name: {}", "✓".green(), name.bold());
+    println!(
+        "{} Upload accepted — app name: {}",
+        "✓".green(),
+        name.bold()
+    );
 
     let pb = spinner("Building and deploying...");
     loop {
