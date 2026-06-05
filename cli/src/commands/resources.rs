@@ -1,5 +1,6 @@
 use super::utils::{colored_status, spinner};
 use crate::api_base;
+use crate::commands::projects::{current_project, require_project};
 use colored::Colorize;
 use serde::Deserialize;
 use std::collections::HashMap;
@@ -19,7 +20,11 @@ async fn find_apps(names: &[&str]) -> Result<Vec<String>, String> {
         return Ok(Vec::new());
     }
 
-    let resp = reqwest::get(format!("{}/app", api_base()))
+    let url = match current_project()? {
+        Some(project) => format!("{}/project/{}/app", api_base(), project),
+        None => format!("{}/app", api_base()),
+    };
+    let resp = reqwest::get(url)
         .await
         .map_err(|e| format!("Request failed: {e}"))?;
 
@@ -58,7 +63,11 @@ fn resource_url(id: &str, action: Option<&str>) -> Result<reqwest::Url, String> 
 }
 
 async fn find_resource(name_or_id: &str) -> Result<Resource, String> {
-    let resp = reqwest::get(format!("{}/resource", api_base()))
+    let url = match current_project()? {
+        Some(project) => format!("{}/project/{}/resource", api_base(), project),
+        None => format!("{}/resource", api_base()),
+    };
+    let resp = reqwest::get(url)
         .await
         .map_err(|e| format!("Request failed: {e}"))?;
 
@@ -190,10 +199,11 @@ pub async fn create(
         "version": version,
     });
 
+    let project = require_project()?;
     let pb = spinner(&format!("Creating resource {}...", display_name));
     let client = reqwest::Client::new();
     let resp = client
-        .post(format!("{}/resource", api_base()))
+        .post(format!("{}/project/{}/resource", api_base(), project))
         .json(&body)
         .send()
         .await
@@ -250,7 +260,9 @@ pub async fn create(
 
 // GET /resource
 pub async fn list() -> Result<(), String> {
-    let resp = reqwest::get(format!("{}/resource", api_base()))
+    let project = require_project()?;
+    let url = format!("{}/project/{}/resource", api_base(), project);
+    let resp = reqwest::get(url)
         .await
         .map_err(|e| format!("Request failed: {e}"))?;
 
@@ -308,8 +320,8 @@ pub async fn info(display_name: &str) -> Result<(), String> {
 
 // DELETE /resource/{id}
 pub async fn delete(display_name: &str) -> Result<(), String> {
-    let pb = spinner(&format!("Deleting {}...", display_name));
     let resource = find_resource(display_name).await?;
+    let pb = spinner(&format!("Deleting {}...", display_name));
     let url = resource_url(&resource.id, None)?;
 
     let client = reqwest::Client::new();
@@ -331,8 +343,8 @@ pub async fn delete(display_name: &str) -> Result<(), String> {
 
 // PATCH /resource/{id} — update version and/or linked apps
 pub async fn edit(display_name: &str, version: Option<&str>, links: &[&str]) -> Result<(), String> {
-    let pb = spinner(&format!("Updating {}...", display_name));
     let resource = find_resource(display_name).await?;
+    let pb = spinner(&format!("Updating {}...", display_name));
     let url = resource_url(&resource.id, None)?;
 
     let mut body = serde_json::json!({});
@@ -374,9 +386,8 @@ pub async fn edit(display_name: &str, version: Option<&str>, links: &[&str]) -> 
 // PATCH /resource/{id} — link to one or more applications
 pub async fn attach(display_name: &str, apps: &[&str]) -> Result<(), String> {
     let new_uuids = find_apps(apps).await?;
-
-    let pb = spinner(&format!("Attaching {}...", display_name));
     let resource = find_resource(display_name).await?;
+    let pb = spinner(&format!("Attaching {}...", display_name));
     let url = resource_url(&resource.id, None)?;
 
     let mut ids: Vec<String> = resource.application_ids.clone();
@@ -413,8 +424,8 @@ pub async fn attach(display_name: &str, apps: &[&str]) -> Result<(), String> {
 
 // POST /resource/{id}/start
 pub async fn start(display_name: &str) -> Result<(), String> {
-    let pb = spinner(&format!("Starting {}...", display_name));
     let resource = find_resource(display_name).await?;
+    let pb = spinner(&format!("Starting {}...", display_name));
     let url = resource_url(&resource.id, Some("start"))?;
 
     let client = reqwest::Client::new();
@@ -437,8 +448,8 @@ pub async fn start(display_name: &str) -> Result<(), String> {
 
 // POST /resource/{id}/stop
 pub async fn stop(display_name: &str) -> Result<(), String> {
-    let pb = spinner(&format!("Stopping {}...", display_name));
     let resource = find_resource(display_name).await?;
+    let pb = spinner(&format!("Stopping {}...", display_name));
     let url = resource_url(&resource.id, Some("stop"))?;
 
     let client = reqwest::Client::new();
@@ -497,8 +508,8 @@ pub async fn env_set(display_name: &str, pair: &str) -> Result<(), String> {
         .split_once('=')
         .ok_or_else(|| "Invalid format: expected KEY=VALUE".to_string())?;
 
-    let pb = spinner(&format!("Setting env for {}...", display_name));
     let resource = find_resource(display_name).await?;
+    let pb = spinner(&format!("Setting env for {}...", display_name));
 
     let get_url = resource_url(&resource.id, Some("env"))?;
     let get_resp = reqwest::get(get_url)

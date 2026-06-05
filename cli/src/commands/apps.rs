@@ -1,5 +1,6 @@
 use super::utils::{colored_status, spinner};
 use crate::api_base;
+use crate::commands::projects::{current_project, require_project};
 use colored::Colorize;
 use serde::Deserialize;
 use serde_json::Value;
@@ -100,8 +101,11 @@ pub async fn deploy(name: &str, image: &str, port: u16) -> Result<(), String> {
         "port": port
     });
 
+    let project = require_project()?;
+    let url = format!("{}/project/{}/app/deploy", api_base(), project);
+
     let resp = client
-        .post(format!("{}/app/deploy", api_base()))
+        .post(url)
         .json(&body)
         .send()
         .await
@@ -122,7 +126,9 @@ pub async fn deploy(name: &str, image: &str, port: u16) -> Result<(), String> {
 
 // GET /app — exists
 pub async fn list() -> Result<(), String> {
-    let resp = reqwest::get(format!("{}/app", api_base()))
+    let project = require_project()?;
+    let url = format!("{}/project/{}/app", api_base(), project);
+    let resp = reqwest::get(url)
         .await
         .map_err(|e| format!("Request failed: {e}"))?;
 
@@ -146,9 +152,16 @@ pub async fn list() -> Result<(), String> {
 
 fn app_url(name: &str, action: &str) -> Result<reqwest::Url, String> {
     let mut url = reqwest::Url::parse(&api_base()).map_err(|e| format!("Invalid API URL: {e}"))?;
-    url.path_segments_mut()
-        .map_err(|_| "API URL cannot be a base".to_string())?
-        .extend(&["app", name, action]);
+    {
+        let mut segments = url
+            .path_segments_mut()
+            .map_err(|_| "API URL cannot be a base".to_string())?;
+        if let Some(project) = current_project()? {
+            segments.extend(&["project", &project, "app", name, action]);
+        } else {
+            segments.extend(&["app", name, action]);
+        }
+    }
     Ok(url)
 }
 
@@ -197,9 +210,16 @@ pub async fn restart(name: &str) -> Result<(), String> {
 // DELETE /app/{name}
 pub async fn delete(name: &str) -> Result<(), String> {
     let mut url = reqwest::Url::parse(&api_base()).map_err(|e| format!("Invalid API URL: {e}"))?;
-    url.path_segments_mut()
-        .map_err(|_| "API URL cannot be a base".to_string())?
-        .extend(&["app", name]);
+    {
+        let mut segments = url
+            .path_segments_mut()
+            .map_err(|_| "API URL cannot be a base".to_string())?;
+        if let Some(project) = current_project()? {
+            segments.extend(&["project", &project, "app", name]);
+        } else {
+            segments.extend(&["app", name]);
+        }
+    }
     let url = url;
     let pb = spinner(&format!("Deleting {}...", name));
     let client = reqwest::Client::new();
@@ -271,8 +291,9 @@ pub async fn upload(source: &str) -> Result<(), String> {
     let form = reqwest::multipart::Form::new().part("file", part);
 
     let client = reqwest::Client::new();
+    let project = require_project()?;
     let resp = client
-        .post(format!("{}/app/upload", api_base()))
+        .post(format!("{}/project/{}/app/upload", api_base(), project))
         .multipart(form)
         .send()
         .await
