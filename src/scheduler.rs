@@ -1,7 +1,8 @@
 use actix_web::rt::time::sleep;
 use bollard::Docker;
 use bollard::models::{
-    ContainerCreateBody, EndpointSettings, HostConfig, NetworkCreateRequest, PortBinding,
+    ContainerCreateBody, EndpointSettings, HostConfig, NetworkConnectRequest, NetworkCreateRequest,
+    PortBinding,
 };
 use bollard::query_parameters::{
     CreateContainerOptionsBuilder, CreateImageOptionsBuilder, ListContainersOptionsBuilder,
@@ -506,6 +507,33 @@ impl Scheduler {
                 ..Default::default()
             })
             .await;
+    }
+
+    pub async fn ensure_container_on_paas_net(
+        &self,
+        container_name: &str,
+    ) -> Result<(), bollard::errors::Error> {
+        self.ensure_paas_net().await;
+
+        let container = self.docker.inspect_container(container_name, None).await?;
+        let already_connected = container
+            .network_settings
+            .and_then(|settings| settings.networks)
+            .is_some_and(|networks| networks.contains_key("paas-net"));
+
+        if already_connected {
+            return Ok(());
+        }
+
+        self.docker
+            .connect_network(
+                "paas-net",
+                NetworkConnectRequest {
+                    container: container_name.to_string(),
+                    ..Default::default()
+                },
+            )
+            .await
     }
 
     async fn create_and_start(
