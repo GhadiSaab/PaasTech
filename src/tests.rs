@@ -386,6 +386,7 @@ async fn test_update_resource_display_name() {
         App::new()
             .app_data(pool.clone())
             .app_data(build_client())
+            .app_data(build_scheduler())
             .service(update_resource),
     )
     .await;
@@ -408,6 +409,7 @@ async fn test_update_resource_not_found() {
         App::new()
             .app_data(pool)
             .app_data(build_client())
+            .app_data(build_scheduler())
             .service(update_resource),
     )
     .await;
