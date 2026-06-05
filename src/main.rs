@@ -276,6 +276,8 @@ async fn upload_app(
             &process.name,
             process.process_type.as_str(),
             &process.path,
+            process.public_host.as_deref(),
+            json!(process.build_env),
             process.port.map(|p| p as i32),
             "building",
         )
@@ -319,6 +321,7 @@ async fn upload_app(
                 &image_name,
                 context.to_string_lossy().to_string(),
                 scheduler_bg.docker_host(),
+                &process.build_env,
             )
             .await
             {
@@ -339,6 +342,7 @@ async fn upload_app(
                     &image_name,
                     process.port,
                     None,
+                    process.public_host.as_deref(),
                     env_vars,
                 )
                 .await
@@ -618,6 +622,7 @@ async fn restart_app(
                     image,
                     process.internal_port.map(|p| p as u16),
                     app.base_domain.as_deref(),
+                    process.public_host.as_deref(),
                     env_vars,
                 )
                 .await

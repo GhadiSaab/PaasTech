@@ -36,6 +36,9 @@ pub struct ProcessDefinition {
     pub process_type: ProcessType,
     pub path: String,
     pub port: Option<u16>,
+    pub public_host: Option<String>,
+    #[serde(default)]
+    pub build_env: HashMap<String, String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -92,6 +95,8 @@ pub fn load_process_definitions(
             process_type: ProcessType::Web,
             path: ".".to_string(),
             port: fallback_port,
+            public_host: None,
+            build_env: HashMap::new(),
         }]);
     }
 
@@ -155,6 +160,50 @@ fn validate_process_definition(root: &Path, process: &ProcessDefinition) -> Resu
         ));
     }
 
+    if let Some(public_host) = process.public_host.as_deref() {
+        validate_public_host(&process.name, public_host)?;
+    }
+
+    for key in process.build_env.keys() {
+        validate_env_key(&process.name, key)?;
+    }
+
+    Ok(())
+}
+
+fn validate_public_host(process_name: &str, public_host: &str) -> Result<(), String> {
+    if public_host.trim().is_empty()
+        || public_host.contains('/')
+        || public_host.contains(':')
+        || public_host.chars().any(char::is_whitespace)
+    {
+        return Err(format!(
+            "process '{}' public_host must be a hostname without scheme, port, slash, or whitespace",
+            process_name
+        ));
+    }
+
+    Ok(())
+}
+
+fn validate_env_key(process_name: &str, key: &str) -> Result<(), String> {
+    let mut chars = key.chars();
+    let Some(first) = chars.next() else {
+        return Err(format!(
+            "process '{}' build_env has an empty key",
+            process_name
+        ));
+    };
+
+    if !(first.is_ascii_alphabetic() || first == '_')
+        || chars.any(|c| !(c.is_ascii_alphanumeric() || c == '_'))
+    {
+        return Err(format!(
+            "process '{}' build_env key '{}' is not a valid environment variable name",
+            process_name, key
+        ));
+    }
+
     Ok(())
 }
 
@@ -183,11 +232,18 @@ pub async fn build_image_with_name(
     image_name: &str,
     from: String,
     docker_host: &str,
+    build_env: &HashMap<String, String>,
 ) -> Result<(), String> {
     let builder = std::env::var("BUILDER").map_err(|_| "BUILDER env var is not set".to_string())?;
 
     let mut cmd = TokioCommand::new("pack");
     cmd.args(["build", image_name, "--path", &from, "--builder", &builder]);
+
+    let mut build_env: Vec<_> = build_env.iter().collect();
+    build_env.sort_by(|(left, _), (right, _)| left.cmp(right));
+    for (key, value) in build_env {
+        cmd.args(["--env", &format!("{key}={value}")]);
+    }
 
     if !docker_host.is_empty() {
         cmd.args(["--docker-host", docker_host]);

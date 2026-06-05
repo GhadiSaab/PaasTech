@@ -1,6 +1,7 @@
 #![allow(dead_code)]
 
 use chrono::NaiveDateTime;
+use serde_json::Value;
 use sqlx::PgPool;
 use uuid::Uuid;
 
@@ -28,6 +29,8 @@ pub struct AppProcess {
     pub name: String,
     pub process_type: String,
     pub build_context: String,
+    pub public_host: Option<String>,
+    pub build_env: Option<Value>,
     pub image_id: Option<String>,
     pub container_id: Option<String>,
     pub internal_port: Option<i32>,
@@ -45,6 +48,8 @@ pub struct ActiveAppProcess {
     pub process_name: String,
     pub process_type: String,
     pub build_context: String,
+    pub public_host: Option<String>,
+    pub build_env: Option<Value>,
     pub image_id: Option<String>,
     pub container_id: Option<String>,
     pub internal_port: Option<i32>,
@@ -203,17 +208,20 @@ impl Registry {
         name: &str,
         process_type: &str,
         build_context: &str,
+        public_host: Option<&str>,
+        build_env: Value,
         internal_port: Option<i32>,
         status: &str,
     ) -> Result<AppProcess, sqlx::Error> {
         sqlx::query_as::<_, AppProcess>(
             r#"
             INSERT INTO application_processes (
-                id, application_id, name, process_type, build_context, internal_port, status, created_at
+                id, application_id, name, process_type, build_context, public_host, build_env,
+                internal_port, status, created_at
             )
-            VALUES ($1, $2, $3, $4, $5, $6, $7, NOW())
-            RETURNING id, application_id, name, process_type, build_context, image_id, container_id,
-                internal_port, host_port, status, created_at
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, NOW())
+            RETURNING id, application_id, name, process_type, build_context, public_host, build_env,
+                image_id, container_id, internal_port, host_port, status, created_at
             "#,
         )
         .bind(Uuid::new_v4())
@@ -221,6 +229,8 @@ impl Registry {
         .bind(name)
         .bind(process_type)
         .bind(build_context)
+        .bind(public_host)
+        .bind(build_env)
         .bind(internal_port)
         .bind(status)
         .fetch_one(pool)
@@ -233,8 +243,8 @@ impl Registry {
     ) -> Result<Vec<AppProcess>, sqlx::Error> {
         sqlx::query_as::<_, AppProcess>(
             r#"
-            SELECT id, application_id, name, process_type, build_context, image_id, container_id,
-                internal_port, host_port, status, created_at
+            SELECT id, application_id, name, process_type, build_context, public_host, build_env,
+                image_id, container_id, internal_port, host_port, status, created_at
             FROM application_processes
             WHERE application_id = $1
             ORDER BY created_at ASC
@@ -257,6 +267,8 @@ impl Registry {
                 p.name AS process_name,
                 p.process_type,
                 p.build_context,
+                p.public_host,
+                p.build_env,
                 p.image_id,
                 p.container_id,
                 p.internal_port,
