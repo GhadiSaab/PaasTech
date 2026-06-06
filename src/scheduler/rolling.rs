@@ -12,8 +12,8 @@ use uuid::Uuid;
 use crate::registry::Registry;
 
 use super::{
-    app_container_name, build_traefik_labels, find_free_port, project_net, resolve_domain,
-    DeployError, Scheduler,
+    DeployError, Scheduler, app_container_name, build_traefik_labels, find_free_port, project_net,
+    resolve_domain,
 };
 
 impl Scheduler {

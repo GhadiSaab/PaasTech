@@ -1,5 +1,5 @@
 use actix_multipart::Multipart;
-use actix_web::{HttpResponse, Responder, delete, error, get, post, put, web};
+use actix_web::{HttpRequest, HttpResponse, Responder, delete, error, get, post, put, web};
 use serde::Deserialize;
 use serde_json::json;
 use sqlx::{PgPool, Row};
@@ -40,6 +40,13 @@ pub struct LogsQuery {
 pub struct EnvSetPayload {
     pub key: String,
     pub value: String,
+}
+
+fn app_name_from_request(req: &HttpRequest) -> String {
+    req.match_info()
+        .get("app_name")
+        .unwrap_or_default()
+        .to_string()
 }
 
 pub(super) async fn fetch_project_env_vars_db(
@@ -309,13 +316,14 @@ pub async fn deploy(
     scheduler: web::Data<Scheduler>,
     body: web::Json<DeployBody>,
 ) -> HttpResponse {
-    let existing_app = match Registry::get_in_project(&scope.pool, scope.project.id, &body.name).await {
-        Ok(app) => app,
-        Err(e) => {
-            eprintln!("deploy: failed to look up {}: {e}", body.name);
-            return HttpResponse::InternalServerError().finish();
-        }
-    };
+    let existing_app =
+        match Registry::get_in_project(&scope.pool, scope.project.id, &body.name).await {
+            Ok(app) => app,
+            Err(e) => {
+                eprintln!("deploy: failed to look up {}: {e}", body.name);
+                return HttpResponse::InternalServerError().finish();
+            }
+        };
     let env_vars = if let Some(app) = existing_app {
         match merged_app_env_vars(&scope.pool, scope.project.id, app.id).await {
             Ok(env) => env,
@@ -382,10 +390,10 @@ pub async fn deploy(
 pub async fn update(
     scope: ProjectScope,
     scheduler: web::Data<Scheduler>,
-    path: web::Path<String>,
+    req: HttpRequest,
     body: web::Json<UpdateBody>,
 ) -> impl Responder {
-    let app_name = path.into_inner();
+    let app_name = app_name_from_request(&req);
     let app = match Registry::get_in_project(&scope.pool, scope.project.id, &app_name).await {
         Ok(Some(app)) => app,
         Ok(None) => return HttpResponse::NotFound().finish(),
@@ -442,9 +450,9 @@ pub async fn update(
 pub async fn stop(
     scope: ProjectScope,
     scheduler: web::Data<Scheduler>,
-    path: web::Path<String>,
+    req: HttpRequest,
 ) -> impl Responder {
-    let app_name = path.into_inner();
+    let app_name = app_name_from_request(&req);
     let app = match Registry::get_in_project(&scope.pool, scope.project.id, &app_name).await {
         Ok(Some(app)) => app,
         Ok(None) => return HttpResponse::NotFound().finish(),
@@ -484,8 +492,7 @@ pub async fn stop(
         }
     }
 
-    if let Err(e) =
-        Registry::update_status(&scope.pool, app.project_id, &app_name, "stopped").await
+    if let Err(e) = Registry::update_status(&scope.pool, app.project_id, &app_name, "stopped").await
     {
         eprintln!("registry: failed to update status for {app_name}: {e}");
     }
@@ -507,9 +514,9 @@ pub async fn stop(
 pub async fn restart(
     scope: ProjectScope,
     scheduler: web::Data<Scheduler>,
-    path: web::Path<String>,
+    req: HttpRequest,
 ) -> impl Responder {
-    let app_name = path.into_inner();
+    let app_name = app_name_from_request(&req);
     let app = match Registry::get_in_project(&scope.pool, scope.project.id, &app_name).await {
         Ok(Some(app)) => app,
         Ok(None) => return HttpResponse::NotFound().finish(),
@@ -685,9 +692,9 @@ pub async fn restart(
 pub async fn status(
     scope: ProjectScope,
     scheduler: web::Data<Scheduler>,
-    path: web::Path<String>,
+    req: HttpRequest,
 ) -> impl Responder {
-    let app_name = path.into_inner();
+    let app_name = app_name_from_request(&req);
     let app = match Registry::get_in_project(&scope.pool, scope.project.id, &app_name).await {
         Ok(Some(app)) => app,
         Ok(None) => return HttpResponse::NotFound().finish(),
@@ -753,9 +760,9 @@ pub async fn status(
 pub async fn delete(
     scope: ProjectScope,
     scheduler: web::Data<Scheduler>,
-    path: web::Path<String>,
+    req: HttpRequest,
 ) -> impl Responder {
-    let app_name = path.into_inner();
+    let app_name = app_name_from_request(&req);
     let app = match Registry::get_in_project(&scope.pool, scope.project.id, &app_name).await {
         Ok(Some(app)) => app,
         Ok(None) => return HttpResponse::NotFound().finish(),
@@ -841,10 +848,10 @@ pub async fn delete(
 pub async fn logs(
     scope: ProjectScope,
     scheduler: web::Data<Scheduler>,
-    path: web::Path<String>,
+    req: HttpRequest,
     query: web::Query<LogsQuery>,
 ) -> impl Responder {
-    let app_name = path.into_inner();
+    let app_name = app_name_from_request(&req);
     let app = match Registry::get_in_project(&scope.pool, scope.project.id, &app_name).await {
         Ok(Some(app)) => app,
         Ok(None) => return HttpResponse::NotFound().finish(),
@@ -901,8 +908,8 @@ pub async fn logs(
     tag = "apps"
 )]
 #[get("/{app_name}/env")]
-pub async fn get_env(scope: ProjectScope, path: web::Path<String>) -> impl Responder {
-    let app_name = path.into_inner();
+pub async fn get_env(scope: ProjectScope, req: HttpRequest) -> impl Responder {
+    let app_name = app_name_from_request(&req);
     let app = match Registry::get_in_project(&scope.pool, scope.project.id, &app_name).await {
         Ok(Some(app)) => app,
         Ok(None) => return HttpResponse::NotFound().finish(),
@@ -948,10 +955,10 @@ pub async fn get_env(scope: ProjectScope, path: web::Path<String>) -> impl Respo
 #[post("/{app_name}/env")]
 pub async fn set_env(
     scope: ProjectScope,
-    path: web::Path<String>,
+    req: HttpRequest,
     payload: web::Json<EnvSetPayload>,
 ) -> impl Responder {
-    let app_name = path.into_inner();
+    let app_name = app_name_from_request(&req);
     let app = match Registry::get_in_project(&scope.pool, scope.project.id, &app_name).await {
         Ok(Some(app)) => app,
         Ok(None) => return HttpResponse::NotFound().finish(),
@@ -998,10 +1005,10 @@ pub async fn set_env(
 #[put("/{app_name}/env")]
 pub async fn update_env(
     scope: ProjectScope,
-    path: web::Path<String>,
+    req: HttpRequest,
     payload: web::Json<HashMap<String, String>>,
 ) -> impl Responder {
-    let app_name = path.into_inner();
+    let app_name = app_name_from_request(&req);
     let app = match Registry::get_in_project(&scope.pool, scope.project.id, &app_name).await {
         Ok(Some(app)) => app,
         Ok(None) => return HttpResponse::NotFound().finish(),
@@ -1050,5 +1057,6 @@ pub async fn update_env(
         return HttpResponse::InternalServerError().finish();
     }
 
-    HttpResponse::Ok().body("Environment variables updated. Restart the application to apply changes.")
+    HttpResponse::Ok()
+        .body("Environment variables updated. Restart the application to apply changes.")
 }

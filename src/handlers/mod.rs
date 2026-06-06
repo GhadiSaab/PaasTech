@@ -44,6 +44,15 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
                 .service(apps::set_env)
                 .service(apps::update_env),
         )
+        // Per-resource operations (UUID-addressed, no project scope)
+        .service(resources::get)
+        .service(resources::update)
+        .service(resources::delete)
+        .service(resources::start)
+        .service(resources::stop)
+        .service(resources::logs)
+        .service(resources::get_env)
+        .service(resources::update_env)
         // Resource create/list scoped by project
         .service(
             web::scope("/resource")
@@ -54,14 +63,5 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
             web::scope("/project/{project}/resource")
                 .service(resources::create)
                 .service(resources::list),
-        )
-        // Per-resource operations (UUID-addressed, no project scope)
-        .service(resources::get)
-        .service(resources::update)
-        .service(resources::delete)
-        .service(resources::start)
-        .service(resources::stop)
-        .service(resources::logs)
-        .service(resources::get_env)
-        .service(resources::update_env);
+        );
 }

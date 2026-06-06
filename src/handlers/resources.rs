@@ -49,7 +49,10 @@ async fn inject_service_env_into_app(
 ) -> Result<(), sqlx::Error> {
     let mut connection_env = service_env.clone();
     if let Some(profile) = connection_profile {
-        connection_env.insert("PAASTECH_CONNECTION_PROFILE".to_string(), profile.to_string());
+        connection_env.insert(
+            "PAASTECH_CONNECTION_PROFILE".to_string(),
+            profile.to_string(),
+        );
     }
     let env_vars =
         connection_env_vars_for_service(service_name, service_host, service_port, &connection_env)
@@ -182,7 +185,11 @@ async fn ensure_attached_service_network(
         }
 
         for process in processes {
-            if process.container_id.as_deref().is_some_and(|id| !id.is_empty()) {
+            if process
+                .container_id
+                .as_deref()
+                .is_some_and(|id| !id.is_empty())
+            {
                 let container_name =
                     app_process_container_name(app.project_id, &app.name, &process.name);
                 scheduler
@@ -301,7 +308,10 @@ pub async fn create(
         payload.version
     );
     let container_port = service_port_for_service(&payload.name);
-    let env_vars: Vec<String> = default_env.iter().map(|(k, v)| format!("{k}={v}")).collect();
+    let env_vars: Vec<String> = default_env
+        .iter()
+        .map(|(k, v)| format!("{k}={v}"))
+        .collect();
     let binds = prepare_config_for_service(&payload.name, &id.to_string())
         .map_err(error::ErrorInternalServerError)?;
     let (container_id, host_port) = scheduler
@@ -522,10 +532,13 @@ pub async fn update(
             .collect::<Result<_, actix_web::Error>>()?;
         attached_app_uuids = app_uuids.iter().map(|(app_uuid, _)| *app_uuid).collect();
 
-        sqlx::query!("DELETE FROM application_services WHERE service_id = $1", uuid)
-            .execute(&mut *tx)
-            .await
-            .map_err(error::ErrorInternalServerError)?;
+        sqlx::query!(
+            "DELETE FROM application_services WHERE service_id = $1",
+            uuid
+        )
+        .execute(&mut *tx)
+        .await
+        .map_err(error::ErrorInternalServerError)?;
 
         for (app_uuid, connection_profile) in &app_uuids {
             sqlx::query(
@@ -736,9 +749,7 @@ pub async fn delete(
         scheduler
             .stop_service(&uuid.to_string())
             .await
-            .map_err(|e| {
-                error::ErrorInternalServerError(format!("Failed to stop service: {e}"))
-            })?;
+            .map_err(|e| error::ErrorInternalServerError(format!("Failed to stop service: {e}")))?;
     }
 
     let result = sqlx::query!("DELETE FROM services WHERE id = $1", uuid)
@@ -855,7 +866,10 @@ pub async fn update_env(
         .map_err(error::ErrorInternalServerError)?
         .ok_or_else(|| error::ErrorNotFound("Resource not found"))?;
 
-    let mut tx = pool.begin().await.map_err(error::ErrorInternalServerError)?;
+    let mut tx = pool
+        .begin()
+        .await
+        .map_err(error::ErrorInternalServerError)?;
     sqlx::query!("DELETE FROM service_env_vars WHERE service_id = $1", uuid)
         .execute(&mut *tx)
         .await
@@ -874,5 +888,6 @@ pub async fn update_env(
     }
 
     tx.commit().await.map_err(error::ErrorInternalServerError)?;
-    Ok(HttpResponse::Ok().body("Environment variables updated. Restart the resource to apply changes."))
+    Ok(HttpResponse::Ok()
+        .body("Environment variables updated. Restart the resource to apply changes."))
 }

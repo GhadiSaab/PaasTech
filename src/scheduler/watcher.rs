@@ -5,7 +5,7 @@ use uuid::Uuid;
 
 use crate::registry::{ActiveAppProcess, App, Registry};
 
-use super::{app_container_name, app_process_container_name, find_free_port, Scheduler};
+use super::{Scheduler, app_container_name, app_process_container_name, find_free_port};
 
 impl Scheduler {
     async fn mark_app_status(pool: &PgPool, project_id: Uuid, app_name: &str, status: &str) {
@@ -41,12 +41,7 @@ impl Scheduler {
         }
     }
 
-    async fn restart_exited_process(
-        &self,
-        pool: &PgPool,
-        process_id: Uuid,
-        container_name: &str,
-    ) {
+    async fn restart_exited_process(&self, pool: &PgPool, process_id: Uuid, container_name: &str) {
         println!("watch: process {container_name} crashed, restarting");
         if let Err(e) = Registry::update_process_status(pool, process_id, "crashed").await {
             eprintln!("watch: failed to update process {container_name}: {e}");

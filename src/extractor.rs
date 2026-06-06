@@ -1,5 +1,5 @@
-use actix_web::{Error, FromRequest, HttpRequest, error, web};
 use actix_web::dev::Payload;
+use actix_web::{Error, FromRequest, HttpRequest, error, web};
 use sqlx::PgPool;
 use std::future::Future;
 use std::pin::Pin;
@@ -20,8 +20,8 @@ impl FromRequest for ProjectScope {
         let project_name = req.match_info().get("project").map(str::to_string);
 
         Box::pin(async move {
-            let pool = pool
-                .ok_or_else(|| error::ErrorInternalServerError("pool not configured"))?;
+            let pool =
+                pool.ok_or_else(|| error::ErrorInternalServerError("pool not configured"))?;
             let project = if let Some(name) = project_name {
                 Registry::get_project(&pool, &name)
                     .await

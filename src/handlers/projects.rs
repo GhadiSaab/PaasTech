@@ -22,7 +22,11 @@ pub async fn create(
     payload: web::Json<CreateProjectPayload>,
 ) -> Result<impl Responder, Error> {
     let name = payload.name.trim();
-    if name.is_empty() || name.chars().any(|c| !(c.is_ascii_alphanumeric() || c == '-')) {
+    if name.is_empty()
+        || name
+            .chars()
+            .any(|c| !(c.is_ascii_alphanumeric() || c == '-'))
+    {
         return Err(error::ErrorBadRequest(
             "Project name must only contain letters, numbers, and hyphens",
         ));
@@ -64,7 +68,10 @@ pub async fn list(pool: web::Data<PgPool>) -> Result<impl Responder, Error> {
     tag = "projects"
 )]
 #[get("/project/{project}")]
-pub async fn get(pool: web::Data<PgPool>, path: web::Path<String>) -> Result<impl Responder, Error> {
+pub async fn get(
+    pool: web::Data<PgPool>,
+    path: web::Path<String>,
+) -> Result<impl Responder, Error> {
     let project = Registry::get_project(&pool, &path.into_inner())
         .await
         .map_err(error::ErrorInternalServerError)?
@@ -156,7 +163,10 @@ pub async fn update_env(
         .await
         .map_err(error::ErrorInternalServerError)?
         .ok_or_else(|| error::ErrorNotFound("Project not found"))?;
-    let mut tx = pool.begin().await.map_err(error::ErrorInternalServerError)?;
+    let mut tx = pool
+        .begin()
+        .await
+        .map_err(error::ErrorInternalServerError)?;
     sqlx::query("DELETE FROM project_env_vars WHERE project_id = $1")
         .bind(project.id)
         .execute(&mut *tx)
@@ -172,5 +182,6 @@ pub async fn update_env(
             .map_err(error::ErrorInternalServerError)?;
     }
     tx.commit().await.map_err(error::ErrorInternalServerError)?;
-    Ok(HttpResponse::Ok().body("Project environment variables updated. Restart apps to apply changes."))
+    Ok(HttpResponse::Ok()
+        .body("Project environment variables updated. Restart apps to apply changes."))
 }

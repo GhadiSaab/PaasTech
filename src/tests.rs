@@ -1,5 +1,5 @@
-use actix_web::{App, web};
 use actix_web::test;
+use actix_web::{App, web};
 use reqwest::Client;
 use serde_json::json;
 use sqlx::PgPool;
@@ -346,8 +346,7 @@ async fn test_create_resource_invalid_service() {
 async fn test_get_resource_not_found() {
     let pool = build_pool().await;
 
-    let app =
-        test::init_service(App::new().app_data(pool).service(handlers::resources::get)).await;
+    let app = test::init_service(App::new().app_data(pool).service(handlers::resources::get)).await;
 
     let req = test::TestRequest::get()
         .uri(&format!("/resource/{}", Uuid::new_v4()))
@@ -360,8 +359,7 @@ async fn test_get_resource_not_found() {
 async fn test_get_resource_invalid_uuid() {
     let pool = build_pool().await;
 
-    let app =
-        test::init_service(App::new().app_data(pool).service(handlers::resources::get)).await;
+    let app = test::init_service(App::new().app_data(pool).service(handlers::resources::get)).await;
 
     let req = test::TestRequest::get()
         .uri("/resource/not-a-uuid")
@@ -375,7 +373,12 @@ async fn test_get_resource() {
     let pool = build_pool().await;
     let id = insert_test_resource(pool.get_ref(), "Test Postgres", "postgres", "16").await;
 
-    let app = test::init_service(App::new().app_data(pool.clone()).service(handlers::resources::get)).await;
+    let app = test::init_service(
+        App::new()
+            .app_data(pool.clone())
+            .service(handlers::resources::get),
+    )
+    .await;
 
     let req = test::TestRequest::get()
         .uri(&format!("/resource/{}", id))
@@ -784,13 +787,11 @@ async fn test_update_and_get_app_env() {
     .unwrap();
 
     let app = test::init_service(
-        App::new()
-            .app_data(pool.clone())
-            .service(
-                web::scope("/app")
-                    .service(handlers::apps::update_env)
-                    .service(handlers::apps::get_env),
-            ),
+        App::new().app_data(pool.clone()).service(
+            web::scope("/app")
+                .service(handlers::apps::update_env)
+                .service(handlers::apps::get_env),
+        ),
     )
     .await;
 

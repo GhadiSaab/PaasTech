@@ -1,7 +1,7 @@
 use sqlx::PgPool;
 use uuid::Uuid;
 
-use super::{models::DEFAULT_PROJECT_ID, App, Registry};
+use super::{App, Registry, models::DEFAULT_PROJECT_ID};
 
 impl Registry {
     #[allow(clippy::too_many_arguments)]
