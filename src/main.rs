@@ -11,7 +11,8 @@ use actix_web::{
 use docker::{
     connection_env_vars_for_service, container_image_for_service, default_env_vars_for_service,
     docker_image_for_service, fetch_service_versions, is_valid_service, prepare_config_for_service,
-    service_port_for_service, valid_services, validate_docker_tag,
+    service_port_for_service, valid_services, validate_connection_profile_for_service,
+    validate_docker_tag,
 };
 use reqwest::Client;
 use serde::Deserialize;
@@ -27,7 +28,10 @@ use crate::engine::{
     MultipartData, ProcessType, build_image_with_name, extract_zip, load_process_definitions,
     save_multipart_file,
 };
-use crate::models::{CreateProjectPayload, CreateResourcePayload, Resource, UpdateResourcePayload};
+use crate::models::{
+    CreateProjectPayload, CreateResourcePayload, Resource, ResourceAttachment,
+    UpdateResourcePayload,
+};
 use crate::registry::Registry;
 use crate::scheduler::{
     DeployError, Scheduler, app_container_name, app_process_container_name, find_free_port,
@@ -543,7 +547,7 @@ async fn handle_upload(
     tokio::spawn(async move {
         let mut failed = false;
 
-        for (process, row) in processes.into_iter().zip(process_rows.into_iter()) {
+        for (process, row) in processes.into_iter().zip(process_rows) {
             let image_name = format!("{}-{}", name_bg, process.name);
             let context = extracted_folder.join(&process.path);
             let env_vars =
@@ -1848,10 +1852,29 @@ async fn inject_service_env_into_app(
     service_host: &str,
     service_port: u16,
     service_env: &HashMap<String, String>,
+    connection_profile: Option<&str>,
 ) -> Result<(), sqlx::Error> {
-    for (key, value) in
-        connection_env_vars_for_service(service_name, service_host, service_port, service_env)
-    {
+    let mut connection_env = service_env.clone();
+    if let Some(connection_profile) = connection_profile {
+        connection_env.insert(
+            "PAASTECH_CONNECTION_PROFILE".to_string(),
+            connection_profile.to_string(),
+        );
+    }
+    let env_vars =
+        connection_env_vars_for_service(service_name, service_host, service_port, &connection_env)
+            .map_err(sqlx::Error::Protocol)?;
+
+    if service_name == "postgres" {
+        sqlx::query(
+            "DELETE FROM application_env_vars WHERE application_id = $1 AND key IN ('DATABASE_ASYNC_URL', 'DATABASE_SYNC_URL')",
+        )
+        .bind(app_uuid)
+        .execute(&mut **tx)
+        .await?;
+    }
+
+    for (key, value) in env_vars {
         sqlx::query!(
             "INSERT INTO application_env_vars (application_id, key, value) VALUES ($1, $2, $3) ON CONFLICT (application_id, key) DO UPDATE SET value = EXCLUDED.value",
             app_uuid,
@@ -1862,6 +1885,53 @@ async fn inject_service_env_into_app(
         .await?;
     }
     Ok(())
+}
+
+fn attachment_from_legacy_app_id(
+    application_id: &str,
+    connection_profile: Option<&str>,
+    service_name: &str,
+) -> Result<ResourceAttachment, Error> {
+    validate_connection_profile_for_service(service_name, connection_profile)
+        .map_err(error::ErrorBadRequest)?;
+
+    Ok(ResourceAttachment {
+        application_id: application_id.to_string(),
+        connection_profile: connection_profile.unwrap_or_default().to_string(),
+    })
+}
+
+fn resource_attachments_from_payload(
+    service_name: &str,
+    application_id: Option<&str>,
+    connection_profile: Option<&str>,
+    attachments: Option<&Vec<ResourceAttachment>>,
+) -> Result<Vec<ResourceAttachment>, Error> {
+    if let Some(attachments) = attachments {
+        for attachment in attachments {
+            validate_connection_profile_for_service(
+                service_name,
+                Some(attachment.connection_profile.as_str()),
+            )
+            .map_err(error::ErrorBadRequest)?;
+        }
+        return Ok(attachments
+            .iter()
+            .map(|attachment| ResourceAttachment {
+                application_id: attachment.application_id.clone(),
+                connection_profile: attachment.connection_profile.clone(),
+            })
+            .collect());
+    }
+
+    match application_id.filter(|id| !id.is_empty()) {
+        Some(application_id) => Ok(vec![attachment_from_legacy_app_id(
+            application_id,
+            connection_profile,
+            service_name,
+        )?]),
+        None => Ok(Vec::new()),
+    }
 }
 
 async fn ensure_attached_service_network(
@@ -2272,6 +2342,12 @@ async fn create_resource(
     validate_docker_tag(&client, docker_image, &payload.version).await?;
 
     let id = Uuid::new_v4();
+    let attachments = resource_attachments_from_payload(
+        &payload.name,
+        payload.application_id.as_deref(),
+        payload.connection_profile.as_deref(),
+        payload.attachments.as_ref(),
+    )?;
 
     let mut tx = pool
         .begin()
@@ -2290,16 +2366,15 @@ async fn create_resource(
     .await
     .map_err(error::ErrorInternalServerError)?;
 
-    if let Some(app_id) = &payload.application_id
-        && !app_id.is_empty()
-    {
-        let app_uuid = Uuid::parse_str(app_id)
+    for attachment in &attachments {
+        let app_uuid = Uuid::parse_str(&attachment.application_id)
             .map_err(|_| error::ErrorBadRequest("Invalid application_id"))?;
-        sqlx::query!(
-            "INSERT INTO application_services (application_id, service_id) VALUES ($1, $2)",
-            app_uuid,
-            id,
+        sqlx::query(
+            "INSERT INTO application_services (application_id, service_id, connection_profile) VALUES ($1, $2, $3)",
         )
+        .bind(app_uuid)
+        .bind(id)
+        .bind(&attachment.connection_profile)
         .execute(&mut *tx)
         .await
         .map_err(error::ErrorInternalServerError)?;
@@ -2353,10 +2428,8 @@ async fn create_resource(
     .await
     .map_err(error::ErrorInternalServerError)?;
 
-    if let Some(app_id) = &payload.application_id
-        && !app_id.is_empty()
-    {
-        let app_uuid = Uuid::parse_str(app_id)
+    for attachment in &attachments {
+        let app_uuid = Uuid::parse_str(&attachment.application_id)
             .map_err(|_| error::ErrorBadRequest("Invalid application_id"))?;
         let service_env_map: HashMap<String, String> = default_env.iter().cloned().collect();
         inject_service_env_into_app(
@@ -2366,6 +2439,7 @@ async fn create_resource(
             &id.to_string(),
             container_port,
             &service_env_map,
+            Some(attachment.connection_profile.as_str()),
         )
         .await
         .map_err(error::ErrorInternalServerError)?;
@@ -2373,10 +2447,8 @@ async fn create_resource(
 
     tx.commit().await.map_err(error::ErrorInternalServerError)?;
 
-    if let Some(app_id) = &payload.application_id
-        && !app_id.is_empty()
-    {
-        let app_uuid = Uuid::parse_str(app_id)
+    for attachment in &attachments {
+        let app_uuid = Uuid::parse_str(&attachment.application_id)
             .map_err(|_| error::ErrorBadRequest("Invalid application_id"))?;
         ensure_attached_service_network(pool.get_ref(), &scheduler, id, &[app_uuid]).await?;
     }
@@ -2388,12 +2460,10 @@ async fn create_resource(
         name: payload.name.clone(),
         version: payload.version.clone(),
         status: "running".to_string(),
-        application_ids: payload
-            .application_id
-            .as_deref()
-            .filter(|s| !s.is_empty())
-            .map(|s| vec![s.to_string()])
-            .unwrap_or_default(),
+        application_ids: attachments
+            .iter()
+            .map(|attachment| attachment.application_id.clone())
+            .collect(),
     }))
 }
 
@@ -2660,34 +2730,7 @@ async fn update_resource(
 
     let mut attached_app_uuids = Vec::new();
 
-    if let Some(app_ids) = &payload.application_ids {
-        let app_uuids: Vec<Uuid> = app_ids
-            .iter()
-            .map(|s| {
-                Uuid::parse_str(s).map_err(|_| error::ErrorBadRequest("Invalid application_id"))
-            })
-            .collect::<Result<_, _>>()?;
-        attached_app_uuids = app_uuids.clone();
-
-        sqlx::query!(
-            "DELETE FROM application_services WHERE service_id = $1",
-            uuid
-        )
-        .execute(&mut *tx)
-        .await
-        .map_err(error::ErrorInternalServerError)?;
-
-        for &app_uuid in &app_uuids {
-            sqlx::query!(
-                "INSERT INTO application_services (application_id, service_id) VALUES ($1, $2)",
-                app_uuid,
-                uuid,
-            )
-            .execute(&mut *tx)
-            .await
-            .map_err(error::ErrorInternalServerError)?;
-        }
-
+    if payload.application_ids.is_some() || payload.attachments.is_some() {
         let service_info = sqlx::query("SELECT name, container_id FROM services WHERE id = $1")
             .bind(uuid)
             .fetch_one(&mut *tx)
@@ -2700,6 +2743,51 @@ async fn update_resource(
         let container_id: Option<String> = service_info
             .try_get("container_id")
             .map_err(error::ErrorInternalServerError)?;
+
+        let attachments = if let Some(attachments) = &payload.attachments {
+            resource_attachments_from_payload(&service_name, None, None, Some(attachments))?
+        } else if let Some(application_ids) = &payload.application_ids {
+            application_ids
+                .iter()
+                .map(|application_id| {
+                    attachment_from_legacy_app_id(application_id, None, &service_name)
+                })
+                .collect::<Result<Vec<_>, _>>()?
+        } else {
+            Vec::new()
+        };
+
+        let app_uuids: Vec<(Uuid, String)> = attachments
+            .iter()
+            .map(|attachment| {
+                Ok((
+                    Uuid::parse_str(&attachment.application_id)
+                        .map_err(|_| error::ErrorBadRequest("Invalid application_id"))?,
+                    attachment.connection_profile.clone(),
+                ))
+            })
+            .collect::<Result<_, Error>>()?;
+        attached_app_uuids = app_uuids.iter().map(|(app_uuid, _)| *app_uuid).collect();
+
+        sqlx::query!(
+            "DELETE FROM application_services WHERE service_id = $1",
+            uuid
+        )
+        .execute(&mut *tx)
+        .await
+        .map_err(error::ErrorInternalServerError)?;
+
+        for (app_uuid, connection_profile) in &app_uuids {
+            sqlx::query(
+                "INSERT INTO application_services (application_id, service_id, connection_profile) VALUES ($1, $2, $3)",
+            )
+            .bind(app_uuid)
+            .bind(uuid)
+            .bind(connection_profile)
+            .execute(&mut *tx)
+            .await
+            .map_err(error::ErrorInternalServerError)?;
+        }
 
         if container_id.as_deref().is_some_and(|s| !s.is_empty()) {
             let service_env: HashMap<String, String> = sqlx::query!(
@@ -2714,14 +2802,15 @@ async fn update_resource(
             .collect();
             let service_port = service_port_for_service(&service_name);
 
-            for &app_uuid in &app_uuids {
+            for (app_uuid, connection_profile) in &app_uuids {
                 inject_service_env_into_app(
                     &mut tx,
-                    app_uuid,
+                    *app_uuid,
                     &service_name,
                     &uuid.to_string(),
                     service_port,
                     &service_env,
+                    Some(connection_profile.as_str()),
                 )
                 .await
                 .map_err(error::ErrorInternalServerError)?;

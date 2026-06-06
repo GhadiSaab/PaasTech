@@ -23,6 +23,12 @@ enum Commands {
         /// Project name
         name: String,
     },
+    /// Deploy the current project directory using its local manifest/buildpack files
+    Deploy {
+        /// Fallback port for projects without process declarations
+        #[arg(long, default_value = "8080", value_parser = clap::value_parser!(u16).range(1..))]
+        port: u16,
+    },
     /// Manage the active project
     Project {
         #[command(subcommand)]
@@ -157,6 +163,9 @@ enum ResourceCommands {
         /// Application name to link at creation (repeatable)
         #[arg(long)]
         link: Vec<String>,
+        /// Connection profile to use for linked apps (for postgres: sync or asyncpg)
+        #[arg(long)]
+        connection: Option<String>,
     },
     /// List all resources
     List,
@@ -180,6 +189,9 @@ enum ResourceCommands {
         /// Application name to link (repeatable)
         #[arg(long)]
         link: Vec<String>,
+        /// Connection profile to use for linked apps (for postgres: sync or asyncpg)
+        #[arg(long)]
+        connection: Option<String>,
     },
     /// Attach a resource to one or more applications
     Attach {
@@ -188,6 +200,9 @@ enum ResourceCommands {
         /// Application name (repeatable)
         #[arg(long)]
         app: Vec<String>,
+        /// Connection profile to use for attached apps (for postgres: sync or asyncpg)
+        #[arg(long)]
+        connection: Option<String>,
     },
     /// Start a stopped resource
     Start {
@@ -245,6 +260,7 @@ async fn main() {
 
     let result = match cli.command {
         Commands::Init { name } => projects::init(&name).await,
+        Commands::Deploy { port } => apps::deploy_current_dir(port).await,
         Commands::Project { command } => match command {
             ProjectCommands::Info => projects::info().await,
             ProjectCommands::List => projects::list().await,
@@ -277,9 +293,10 @@ async fn main() {
                 r#type,
                 version,
                 link,
+                connection,
             } => {
                 let refs: Vec<&str> = link.iter().map(|s| s.as_str()).collect();
-                resources::create(&name, &r#type, &version, &refs).await
+                resources::create(&name, &r#type, &version, &refs, connection.as_deref()).await
             }
             ResourceCommands::List => resources::list().await,
             ResourceCommands::Info { name } => resources::info(&name).await,
@@ -288,13 +305,18 @@ async fn main() {
                 name,
                 version,
                 link,
+                connection,
             } => {
                 let refs: Vec<&str> = link.iter().map(|s| s.as_str()).collect();
-                resources::edit(&name, version.as_deref(), &refs).await
+                resources::edit(&name, version.as_deref(), &refs, connection.as_deref()).await
             }
-            ResourceCommands::Attach { name, app } => {
+            ResourceCommands::Attach {
+                name,
+                app,
+                connection,
+            } => {
                 let refs: Vec<&str> = app.iter().map(|s| s.as_str()).collect();
-                resources::attach(&name, &refs).await
+                resources::attach(&name, &refs, connection.as_deref()).await
             }
             ResourceCommands::Start { name } => resources::start(&name).await,
             ResourceCommands::Stop { name } => resources::stop(&name).await,

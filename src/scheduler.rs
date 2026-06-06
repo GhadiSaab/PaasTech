@@ -92,12 +92,16 @@ fn image_with_default_tag(image: &str) -> String {
 
 fn build_traefik_labels(
     app_name: &str,
+    process_name: Option<&str>,
     internal_port: u16,
     version: &str,
     base_domain: &str,
     public_host: Option<&str>,
 ) -> HashMap<String, String> {
-    let service_name = format!("{app_name}-{version}");
+    let service_base = process_name
+        .map(|process_name| format!("{app_name}-{process_name}"))
+        .unwrap_or_else(|| app_name.to_string());
+    let service_name = format!("{service_base}-{version}");
     let router_name = &service_name;
     let host = public_host
         .map(str::to_string)
@@ -120,8 +124,20 @@ fn build_traefik_labels(
     labels
 }
 
+fn labels_for_project_network(
+    mut labels: HashMap<String, String>,
+    network_name: &str,
+) -> HashMap<String, String> {
+    labels.insert(
+        "traefik.docker.network".to_string(),
+        network_name.to_string(),
+    );
+    labels
+}
+
 fn traefik_labels(
     app_name: &str,
+    process_name: Option<&str>,
     internal_port: u16,
     base_domain: &str,
     public_host: Option<&str>,
@@ -131,7 +147,14 @@ fn traefik_labels(
         .unwrap_or_default()
         .as_secs()
         .to_string();
-    build_traefik_labels(app_name, internal_port, &version, base_domain, public_host)
+    build_traefik_labels(
+        app_name,
+        process_name,
+        internal_port,
+        &version,
+        base_domain,
+        public_host,
+    )
 }
 
 fn resolve_domain(base_domain: Option<&str>) -> String {
@@ -665,6 +688,17 @@ impl Scheduler {
             .await
     }
 
+    async fn ensure_traefik_on_network(
+        &self,
+        network_name: &str,
+    ) -> Result<(), bollard::errors::Error> {
+        let container_name =
+            std::env::var("TRAEFIK_CONTAINER").unwrap_or_else(|_| "paastech-traefik-1".to_string());
+        self.ensure_container_on_network(network_name, &container_name)
+            .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
     async fn create_and_start(
         &self,
         container_name: &str,
@@ -676,6 +710,7 @@ impl Scheduler {
         env_vars: Vec<String>,
     ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
         self.ensure_network(network_name).await;
+        self.ensure_traefik_on_network(network_name).await?;
         let port_key = format!("{}/tcp", internal_port);
         let mut port_bindings: HashMap<String, Option<Vec<PortBinding>>> = HashMap::new();
         port_bindings.insert(
@@ -705,7 +740,7 @@ impl Scheduler {
                         port_bindings: Some(port_bindings),
                         ..Default::default()
                     }),
-                    labels: Some(labels),
+                    labels: Some(labels_for_project_network(labels, network_name)),
                     networking_config: Some(bollard::models::NetworkingConfig {
                         endpoints_config: Some(project_net(network_name)),
                     }),
@@ -781,6 +816,7 @@ impl Scheduler {
         Ok(container_id)
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub async fn start_process(
         &self,
         project_id: Uuid,
@@ -806,7 +842,13 @@ impl Scheduler {
                     ))
                 })?;
                 let domain = resolve_domain(base_domain);
-                let labels = traefik_labels(app_name, internal_port, &domain, public_host);
+                let labels = traefik_labels(
+                    app_name,
+                    Some(process_name),
+                    internal_port,
+                    &domain,
+                    public_host,
+                );
                 let mut env_vars = env_vars;
                 env_vars.push(format!("PORT={internal_port}"));
                 let container_id = self
@@ -847,6 +889,7 @@ impl Scheduler {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub async fn start_service(
         &self,
         service_id: &str,
@@ -981,6 +1024,7 @@ impl Scheduler {
         Ok(())
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub async fn deploy(
         &self,
         pool: &PgPool,
@@ -1000,7 +1044,7 @@ impl Scheduler {
         })?;
 
         let domain = resolve_domain(base_domain);
-        let labels = traefik_labels(app_name, internal_port, &domain, None);
+        let labels = traefik_labels(app_name, None, internal_port, &domain, None);
         let container_name = app_container_name(project_id, app_name);
 
         let container_id = self
@@ -1037,6 +1081,7 @@ impl Scheduler {
         Ok(())
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub async fn redeploy(
         &self,
         pool: &PgPool,
@@ -1069,7 +1114,7 @@ impl Scheduler {
             .await;
 
         let domain = resolve_domain(base_domain);
-        let labels = traefik_labels(app_name, internal_port, &domain, None);
+        let labels = traefik_labels(app_name, None, internal_port, &domain, None);
 
         let container_id = self
             .create_and_start(
@@ -1101,6 +1146,7 @@ impl Scheduler {
         Ok(())
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub async fn rolling_update(
         &self,
         pool: &PgPool,
@@ -1245,7 +1291,7 @@ impl Scheduler {
                 )));
             }
         };
-        let mut labels = build_traefik_labels(name, internal_port, &version, &domain, None);
+        let mut labels = build_traefik_labels(name, None, internal_port, &version, &domain, None);
         let router_name = format!("{name}-{version}");
         labels.insert(
             format!("traefik.http.routers.{router_name}.priority"),
@@ -1491,7 +1537,9 @@ impl Scheduler {
 
 #[cfg(test)]
 mod tests {
-    use super::{build_traefik_labels, exposed_tcp_ports, image_with_default_tag};
+    use super::{
+        build_traefik_labels, exposed_tcp_ports, image_with_default_tag, labels_for_project_network,
+    };
 
     #[test]
     fn exposed_tcp_ports_filters_protocols_and_duplicates() {
@@ -1508,7 +1556,7 @@ mod tests {
 
     #[test]
     fn build_traefik_labels_uses_versioned_router_and_service_names() {
-        let labels = build_traefik_labels("api", 8080, "123", "example.com", None);
+        let labels = build_traefik_labels("api", None, 8080, "123", "example.com", None);
 
         assert_eq!(
             labels.get("traefik.http.routers.api-123.rule"),
@@ -1527,9 +1575,28 @@ mod tests {
     }
 
     #[test]
+    fn build_traefik_labels_scopes_process_services_without_changing_host() {
+        let labels = build_traefik_labels("app", Some("api"), 8000, "123", "example.com", None);
+
+        assert_eq!(
+            labels.get("traefik.http.routers.app-api-123.rule"),
+            Some(&"Host(`app.example.com`)".to_string())
+        );
+        assert_eq!(
+            labels.get("traefik.http.routers.app-api-123.service"),
+            Some(&"app-api-123".to_string())
+        );
+        assert_eq!(
+            labels.get("traefik.http.services.app-api-123.loadbalancer.server.port"),
+            Some(&"8000".to_string())
+        );
+    }
+
+    #[test]
     fn build_traefik_labels_can_use_public_host() {
         let labels = build_traefik_labels(
             "api",
+            None,
             8080,
             "123",
             "example.com",
@@ -1539,6 +1606,19 @@ mod tests {
         assert_eq!(
             labels.get("traefik.http.routers.api-123.rule"),
             Some(&"Host(`api.datachef.localhost`)".to_string())
+        );
+    }
+
+    #[test]
+    fn labels_for_project_network_selects_reachable_network_for_traefik() {
+        let labels = labels_for_project_network(
+            build_traefik_labels("api", None, 8080, "123", "example.com", None),
+            "paastech-project",
+        );
+
+        assert_eq!(
+            labels.get("traefik.docker.network"),
+            Some(&"paastech-project".to_string())
         );
     }
 
