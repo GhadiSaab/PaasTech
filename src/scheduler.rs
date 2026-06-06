@@ -210,6 +210,31 @@ impl Scheduler {
             .collect()
     }
 
+    pub async fn container_statuses(&self) -> HashMap<String, String> {
+        self.docker
+            .list_containers(Some(
+                ListContainersOptionsBuilder::default().all(true).build(),
+            ))
+            .await
+            .unwrap_or_default()
+            .into_iter()
+            .filter_map(|c| {
+                let name = c
+                    .names
+                    .and_then(|names| names.into_iter().next())
+                    .map(|n| n.trim_start_matches('/').to_string())?;
+                let state = c.state.map(|s| s.to_string()).unwrap_or_default();
+                let paas_status = match state.as_str() {
+                    "running" | "restarting" => "running",
+                    "exited" | "paused" | "created" => "stopped",
+                    "dead" => "crashed",
+                    _ => return None,
+                };
+                Some((name, paas_status.to_string()))
+            })
+            .collect()
+    }
+
     pub async fn restart(&self, app_name: &str) -> Result<(), bollard::errors::Error> {
         self.docker
             .restart_container(

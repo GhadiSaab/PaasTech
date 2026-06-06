@@ -1,9 +1,8 @@
 mod commands;
 
 use clap::{CommandFactory, Parser, Subcommand};
-use clap_complete::{Shell, generate};
-use commands::{apps, resources};
-use std::io;
+use clap_complete::{ArgValueCandidates, CompleteEnv, Shell};
+use commands::{apps, complete, resources};
 
 #[derive(Parser)]
 #[command(
@@ -55,32 +54,37 @@ enum AppCommands {
     /// Delete an application
     Delete {
         /// Application name
+        #[arg(add = ArgValueCandidates::new(complete::app_names))]
         name: String,
     },
     /// Show info about an application
     Info {
         /// Application name
+        #[arg(add = ArgValueCandidates::new(complete::app_names))]
         name: String,
     },
     /// Stop a running application
     Stop {
         /// Application name
+        #[arg(add = ArgValueCandidates::new(complete::app_names))]
         name: String,
     },
     /// Restart an application
     Restart {
         /// Application name
+        #[arg(add = ArgValueCandidates::new(complete::app_names))]
         name: String,
     },
     /// Upload a zip of source code to the server
     Upload {
         /// Path to the zip file
-        #[arg(long)]
+        #[arg(long, value_hint = clap::ValueHint::FilePath)]
         source: String,
     },
     /// Show logs for an application
     Logs {
         /// Application name
+        #[arg(add = ArgValueCandidates::new(complete::app_names))]
         name: String,
         /// Number of lines to show from the end
         #[arg(long)]
@@ -98,6 +102,7 @@ enum EnvCommands {
     /// Set an environment variable (format: KEY=VALUE)
     Set {
         /// Application name
+        #[arg(add = ArgValueCandidates::new(complete::app_names))]
         name: String,
         /// Key=Value pair
         pair: String,
@@ -105,6 +110,7 @@ enum EnvCommands {
     /// List environment variables for an application
     List {
         /// Application name
+        #[arg(add = ArgValueCandidates::new(complete::app_names))]
         name: String,
     },
 }
@@ -112,6 +118,7 @@ enum EnvCommands {
 #[derive(Subcommand)]
 enum ResourceCommands {
     /// Create a managed resource
+    #[command(disable_version_flag = true)]
     Create {
         /// Resource display name
         name: String,
@@ -122,7 +129,7 @@ enum ResourceCommands {
         #[arg(long)]
         version: String,
         /// Application name to link at creation (repeatable)
-        #[arg(long)]
+        #[arg(long, add = ArgValueCandidates::new(complete::app_names))]
         link: Vec<String>,
     },
     /// List all resources
@@ -130,45 +137,53 @@ enum ResourceCommands {
     /// Show info about a resource
     Info {
         /// Resource name
+        #[arg(add = ArgValueCandidates::new(complete::resource_names))]
         name: String,
     },
     /// Delete a resource
     Delete {
         /// Resource name
+        #[arg(add = ArgValueCandidates::new(complete::resource_names))]
         name: String,
     },
     /// Update a resource's version or linked application
+    #[command(disable_version_flag = true)]
     Edit {
         /// Resource name
+        #[arg(add = ArgValueCandidates::new(complete::resource_names))]
         name: String,
         /// New Docker Hub version tag
         #[arg(long)]
         version: Option<String>,
         /// Application name to link (repeatable)
-        #[arg(long)]
+        #[arg(long, add = ArgValueCandidates::new(complete::app_names))]
         link: Vec<String>,
     },
     /// Attach a resource to one or more applications
     Attach {
         /// Resource name
+        #[arg(add = ArgValueCandidates::new(complete::resource_names))]
         name: String,
         /// Application name (repeatable)
-        #[arg(long)]
+        #[arg(long, add = ArgValueCandidates::new(complete::app_names))]
         app: Vec<String>,
     },
     /// Start a stopped resource
     Start {
         /// Resource name
+        #[arg(add = ArgValueCandidates::new(complete::resource_names))]
         name: String,
     },
     /// Stop a running resource
     Stop {
         /// Resource name
+        #[arg(add = ArgValueCandidates::new(complete::resource_names))]
         name: String,
     },
     /// Show logs for a resource
     Logs {
         /// Resource name
+        #[arg(add = ArgValueCandidates::new(complete::resource_names))]
         name: String,
         /// Number of lines to show from the end
         #[arg(long)]
@@ -191,6 +206,7 @@ enum ResourceEnvCommands {
     /// Set an environment variable (format: KEY=VALUE)
     Set {
         /// Resource name
+        #[arg(add = ArgValueCandidates::new(complete::resource_names))]
         name: String,
         /// Key=Value pair
         pair: String,
@@ -198,6 +214,7 @@ enum ResourceEnvCommands {
     /// List environment variables for a resource
     List {
         /// Resource name
+        #[arg(add = ArgValueCandidates::new(complete::resource_names))]
         name: String,
     },
 }
@@ -206,13 +223,35 @@ pub fn api_base() -> String {
     std::env::var("PAAS_API_URL").unwrap_or_else(|_| "http://127.0.0.1:8080".to_string())
 }
 
-#[tokio::main]
-async fn main() {
+fn main() {
+    // Intercepts tab completion requests (COMPLETE=<shell> env var) before starting the runtime.
+    // This allows ArgValueCandidates callbacks to create their own tokio runtime safely.
+    CompleteEnv::with_factory(Cli::command).complete();
+
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(run());
+}
+
+async fn run() {
     let cli = Cli::parse();
 
     let result = match cli.command {
         Commands::Completion { shell } => {
-            generate(shell, &mut Cli::command(), "paastech", &mut io::stdout());
+            // Output the completion registration script for the requested shell.
+            // Setting COMPLETE=<shell> makes CompleteEnv write the script and exit.
+            let shell_str = match shell {
+                Shell::Bash => "bash",
+                Shell::Zsh => "zsh",
+                Shell::Fish => "fish",
+                Shell::Elvish => "elvish",
+                Shell::PowerShell => "powershell",
+                _ => return,
+            };
+            unsafe { std::env::set_var("COMPLETE", shell_str) };
+            CompleteEnv::with_factory(Cli::command).complete();
             return;
         }
         Commands::App { command } => match command {

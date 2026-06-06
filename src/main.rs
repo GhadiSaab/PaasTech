@@ -303,14 +303,21 @@ async fn upload_app(
     tag = "apps"
 )]
 #[get("/app")]
-async fn list_apps(pool: web::Data<PgPool>) -> impl Responder {
-    match Registry::list(&pool).await {
-        Ok(apps) => HttpResponse::Ok().json(apps),
+async fn list_apps(pool: web::Data<PgPool>, scheduler: web::Data<Scheduler>) -> impl Responder {
+    let mut apps = match Registry::list(&pool).await {
+        Ok(apps) => apps,
         Err(e) => {
             eprintln!("registry: list_apps failed: {e}");
-            HttpResponse::InternalServerError().finish()
+            return HttpResponse::InternalServerError().finish();
+        }
+    };
+    let docker_statuses = scheduler.container_statuses().await;
+    for app in &mut apps {
+        if let Some(status) = docker_statuses.get(&app.name) {
+            app.status = Some(status.clone());
         }
     }
+    HttpResponse::Ok().json(apps)
 }
 
 #[derive(Deserialize, utoipa::ToSchema)]
