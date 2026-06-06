@@ -4,7 +4,12 @@ use crate::commands::projects::{current_project, require_project};
 use colored::Colorize;
 use serde::Deserialize;
 use serde_json::Value;
+use std::fs::File;
+use std::io::{Read, Write};
+use std::path::{Component, Path, PathBuf};
 use std::time::Duration;
+use walkdir::WalkDir;
+use zip::write::SimpleFileOptions;
 
 #[derive(Deserialize)]
 struct App {
@@ -37,7 +42,7 @@ fn print_table(apps: &[App]) {
         .max()
         .unwrap_or(6)
         .max(6);
-    let col_created = 26_usize.max(10);
+    let col_created = 26_usize;
 
     let sep = format!(
         "+-{}-+-{}-+-{}-+-{}-+-{}-+",
@@ -271,85 +276,7 @@ pub async fn upload(source: &str) -> Result<(), String> {
         return Err("Source must be a .zip file".to_string());
     }
 
-    let pb = spinner("Uploading...");
-
-    let file_bytes = tokio::fs::read(path)
-        .await
-        .map_err(|e| format!("Failed to read file: {e}"))?;
-
-    let filename = path
-        .file_name()
-        .and_then(|n| n.to_str())
-        .unwrap_or("app.zip")
-        .to_string();
-
-    let part = reqwest::multipart::Part::bytes(file_bytes)
-        .file_name(filename)
-        .mime_str("application/zip")
-        .map_err(|e| format!("MIME error: {e}"))?;
-
-    let form = reqwest::multipart::Form::new().part("file", part);
-
-    let client = reqwest::Client::new();
-    let project = require_project()?;
-    let resp = client
-        .post(format!("{}/project/{}/app/upload", api_base(), project))
-        .multipart(form)
-        .send()
-        .await
-        .map_err(|e| format!("Request failed: {e}"))?;
-
-    pb.finish_and_clear();
-
-    if !resp.status().is_success() {
-        let status = resp.status();
-        let text = resp.text().await.unwrap_or_default();
-        return Err(format!("Upload failed ({}): {}", status, text));
-    }
-
-    let body: serde_json::Value = resp
-        .json()
-        .await
-        .map_err(|e| format!("Failed to parse response: {e}"))?;
-
-    let name = body["name"]
-        .as_str()
-        .ok_or("Server response missing 'name' field")?
-        .to_string();
-
-    println!(
-        "{} Upload accepted — app name: {}",
-        "✓".green(),
-        name.bold()
-    );
-
-    let pb = spinner("Building and deploying...");
-    loop {
-        tokio::time::sleep(Duration::from_secs(5)).await;
-
-        let status_resp = client
-            .get(format!("{}/app/{}/status", api_base(), name))
-            .send()
-            .await
-            .map_err(|e| format!("Status check failed: {e}"))?;
-
-        let status_text = status_resp.text().await.unwrap_or_default();
-
-        match status_text.as_str() {
-            "running" => {
-                pb.finish_and_clear();
-                println!("{} App {} is running", "✓".green(), name.bold());
-                return Ok(());
-            }
-            "failed" => {
-                pb.finish_and_clear();
-                return Err(format!("Build or deploy failed for {}", name));
-            }
-            other => {
-                pb.set_message(format!("Status: {other}..."));
-            }
-        }
-    }
+    upload_archive(path, None).await
 }
 
 // GET /app/{name}/logs
@@ -373,6 +300,215 @@ pub async fn logs(name: &str, tail: Option<u32>) -> Result<(), String> {
     }
 
     Ok(())
+}
+
+pub async fn deploy_current_dir(port: u16) -> Result<(), String> {
+    let root = project_root()?;
+    validate_source_project(&root)?;
+
+    let archive = package_project(&root)?;
+    let result = upload_archive(&archive, Some(port)).await;
+    let _ = std::fs::remove_file(&archive);
+    result
+}
+
+async fn upload_archive(path: &Path, fallback_port: Option<u16>) -> Result<(), String> {
+    let pb = spinner("Packaging and uploading...");
+
+    let file_bytes = tokio::fs::read(path)
+        .await
+        .map_err(|e| format!("Failed to read archive: {e}"))?;
+
+    let filename = path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("app.zip")
+        .to_string();
+
+    let part = reqwest::multipart::Part::bytes(file_bytes)
+        .file_name(filename)
+        .mime_str("application/zip")
+        .map_err(|e| format!("MIME error: {e}"))?;
+
+    let mut form = reqwest::multipart::Form::new().part("file", part);
+    if let Some(port) = fallback_port {
+        form = form.text("internal_port", port.to_string());
+    }
+
+    let client = reqwest::Client::new();
+    let project = require_project()?;
+    let resp = client
+        .post(format!("{}/project/{}/app/upload", api_base(), project))
+        .multipart(form)
+        .send()
+        .await
+        .map_err(|e| format!("Request failed: {e}"))?;
+
+    pb.finish_and_clear();
+
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let text = resp.text().await.unwrap_or_default();
+        return Err(format!("Deploy failed ({}): {}", status, text));
+    }
+
+    let body: serde_json::Value = resp
+        .json()
+        .await
+        .map_err(|e| format!("Failed to parse response: {e}"))?;
+
+    let name = body["name"]
+        .as_str()
+        .ok_or("Server response missing 'name' field")?
+        .to_string();
+
+    println!(
+        "{} Deploy accepted — app name: {}",
+        "✓".green(),
+        name.bold()
+    );
+
+    wait_until_running(&client, &project, &name).await
+}
+
+async fn wait_until_running(
+    client: &reqwest::Client,
+    project: &str,
+    name: &str,
+) -> Result<(), String> {
+    let pb = spinner("Building and deploying...");
+    loop {
+        tokio::time::sleep(Duration::from_secs(5)).await;
+
+        let status_resp = client
+            .get(format!(
+                "{}/project/{}/app/{}/status",
+                api_base(),
+                project,
+                name
+            ))
+            .send()
+            .await
+            .map_err(|e| format!("Status check failed: {e}"))?;
+
+        let status_text = status_resp.text().await.unwrap_or_default();
+
+        match status_text.as_str() {
+            "running" => {
+                pb.finish_and_clear();
+                println!("{} App {} is running", "✓".green(), name.bold());
+                return Ok(());
+            }
+            "failed" => {
+                pb.finish_and_clear();
+                return Err(format!("Build or deploy failed for {}", name));
+            }
+            other => {
+                pb.set_message(format!("Status: {other}..."));
+            }
+        }
+    }
+}
+
+fn project_root() -> Result<PathBuf, String> {
+    let mut dir =
+        std::env::current_dir().map_err(|e| format!("Failed to read current directory: {e}"))?;
+    loop {
+        let candidate = dir.join("paastech.toml");
+        if candidate.is_file() {
+            return Ok(dir);
+        }
+        if !dir.pop() {
+            return Err(
+                "No paastech.toml found. Run `paastech init <project-name>` first.".to_string(),
+            );
+        }
+    }
+}
+
+fn validate_source_project(root: &Path) -> Result<(), String> {
+    if !root.join("paastech.toml").is_file() {
+        return Err("No paastech.toml found in project root".to_string());
+    }
+
+    Ok(())
+}
+
+fn package_project(root: &Path) -> Result<PathBuf, String> {
+    let archive_path =
+        std::env::temp_dir().join(format!("paastech-deploy-{}.zip", std::process::id()));
+    let file = File::create(&archive_path)
+        .map_err(|e| format!("Failed to create {}: {e}", archive_path.display()))?;
+    let mut zip = zip::ZipWriter::new(file);
+    let options = SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
+
+    for entry in WalkDir::new(root).follow_links(false) {
+        let entry = entry.map_err(|e| format!("Failed to walk project files: {e}"))?;
+        let path = entry.path();
+        if path == root || should_skip(root, path) {
+            continue;
+        }
+
+        let relative = path
+            .strip_prefix(root)
+            .map_err(|e| format!("Failed to build archive path: {e}"))?;
+        let archive_name = relative
+            .to_string_lossy()
+            .replace(std::path::MAIN_SEPARATOR, "/");
+
+        if entry.file_type().is_dir() {
+            zip.add_directory(format!("{archive_name}/"), options)
+                .map_err(|e| format!("Failed to add directory to archive: {e}"))?;
+            continue;
+        }
+
+        if !entry.file_type().is_file() {
+            continue;
+        }
+
+        zip.start_file(archive_name, options)
+            .map_err(|e| format!("Failed to add file to archive: {e}"))?;
+        let mut source =
+            File::open(path).map_err(|e| format!("Failed to open {}: {e}", path.display()))?;
+        let mut buffer = Vec::new();
+        source
+            .read_to_end(&mut buffer)
+            .map_err(|e| format!("Failed to read {}: {e}", path.display()))?;
+        zip.write_all(&buffer)
+            .map_err(|e| format!("Failed to write archive: {e}"))?;
+    }
+
+    zip.finish()
+        .map_err(|e| format!("Failed to finish archive: {e}"))?;
+    Ok(archive_path)
+}
+
+fn should_skip(root: &Path, path: &Path) -> bool {
+    let Ok(relative) = path.strip_prefix(root) else {
+        return true;
+    };
+
+    let mut components = relative.components();
+    let first = components.next();
+    if matches!(
+        first,
+        Some(Component::Normal(name))
+            if matches!(
+                name.to_str(),
+                Some(".git" | ".hg" | ".svn" | "target" | "node_modules" | ".venv" | "venv" | "__pycache__")
+            )
+    ) {
+        return true;
+    }
+
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| {
+            matches!(
+                name,
+                ".DS_Store" | ".env" | ".env.local" | ".envrc" | "paastech-deploy.zip"
+            ) || name.ends_with(".zip")
+        })
 }
 
 // POST /app/{name}/env

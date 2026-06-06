@@ -19,11 +19,19 @@ pub struct Resource {
 }
 
 #[derive(Deserialize, ToSchema)]
+pub struct ResourceAttachment {
+    pub application_id: String,
+    pub connection_profile: String,
+}
+
+#[derive(Deserialize, ToSchema)]
 pub struct CreateResourcePayload {
     pub display_name: String,
     pub name: String,
     pub version: String,
     pub application_id: Option<String>,
+    pub connection_profile: Option<String>,
+    pub attachments: Option<Vec<ResourceAttachment>>,
 }
 
 #[derive(Deserialize, ToSchema)]
@@ -31,4 +39,5 @@ pub struct UpdateResourcePayload {
     pub display_name: Option<String>,
     pub version: Option<String>,
     pub application_ids: Option<Vec<String>>,
+    pub attachments: Option<Vec<ResourceAttachment>>,
 }

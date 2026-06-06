@@ -41,10 +41,14 @@ CREATE TABLE IF NOT EXISTS services (
 CREATE TABLE IF NOT EXISTS application_services (
     application_id UUID NOT NULL,
     service_id UUID NOT NULL,
+    connection_profile VARCHAR(32) NULL,
     PRIMARY KEY (application_id, service_id),
     FOREIGN KEY (application_id) REFERENCES applications(id) ON DELETE CASCADE,
     FOREIGN KEY (service_id) REFERENCES services(id) ON DELETE CASCADE
 );
+
+ALTER TABLE application_services
+ADD COLUMN IF NOT EXISTS connection_profile VARCHAR(32) NULL;
 
 CREATE TABLE IF NOT EXISTS application_processes (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),

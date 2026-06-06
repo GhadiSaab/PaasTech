@@ -54,6 +54,7 @@ pub struct ProcessDefinition {
 
 #[derive(Debug, Deserialize)]
 struct PaastechManifest {
+    #[serde(default)]
     processes: Vec<ProcessDefinition>,
 }
 
@@ -115,7 +116,16 @@ pub fn load_process_definitions(
         toml::from_str(&manifest).map_err(|e| format!("Invalid paastech.toml: {e}"))?;
 
     if manifest.processes.is_empty() {
-        return Err("paastech.toml must declare at least one process".to_string());
+        let fallback = ProcessDefinition {
+            name: "web".to_string(),
+            process_type: ProcessType::Web,
+            path: ".".to_string(),
+            port: fallback_port,
+            public_host: None,
+            build_env: HashMap::new(),
+        };
+        validate_process_definition(root, &fallback)?;
+        return Ok(vec![fallback]);
     }
 
     let mut seen_names = std::collections::HashSet::new();
@@ -262,7 +272,7 @@ pub async fn build_image_with_name(
     cmd.args(["build", image_name, "--path", &from, "--builder", &builder]);
 
     let mut build_env: Vec<_> = build_env.iter().collect();
-    build_env.sort_by(|(left, _), (right, _)| left.cmp(right));
+    build_env.sort_by_key(|(key, _)| *key);
     for (key, value) in build_env {
         cmd.args(["--env", &format!("{key}={value}")]);
     }
@@ -286,4 +296,67 @@ pub async fn build_image_with_name(
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn temp_project() -> PathBuf {
+        let suffix = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!("paastech-engine-test-{suffix}"));
+        fs::create_dir_all(&path).unwrap();
+        path
+    }
+
+    #[test]
+    fn project_only_manifest_falls_back_to_web_process() {
+        let root = temp_project();
+        fs::write(root.join("paastech.toml"), "[project]\nname = \"demo\"\n").unwrap();
+
+        let processes = load_process_definitions(&root, Some(8080)).unwrap();
+
+        assert_eq!(processes.len(), 1);
+        assert_eq!(processes[0].name, "web");
+        assert_eq!(processes[0].process_type, ProcessType::Web);
+        assert_eq!(processes[0].path, ".");
+        assert_eq!(processes[0].port, Some(8080));
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn manifest_can_include_project_metadata_and_processes() {
+        let root = temp_project();
+        fs::create_dir_all(root.join("api")).unwrap();
+        fs::write(
+            root.join("paastech.toml"),
+            r#"
+[project]
+name = "demo"
+
+[[processes]]
+name = "api"
+type = "web"
+path = "api"
+port = 3000
+"#,
+        )
+        .unwrap();
+
+        let processes = load_process_definitions(&root, None).unwrap();
+
+        assert_eq!(processes.len(), 1);
+        assert_eq!(processes[0].name, "api");
+        assert_eq!(processes[0].process_type, ProcessType::Web);
+        assert_eq!(processes[0].path, "api");
+        assert_eq!(processes[0].port, Some(3000));
+
+        fs::remove_dir_all(root).unwrap();
+    }
 }

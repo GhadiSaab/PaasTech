@@ -125,7 +125,7 @@ fn print_table(resources: &[Resource]) {
         .max()
         .unwrap_or(6)
         .max(6);
-    let col_links = 36_usize.max(11);
+    let col_links = 36_usize;
 
     let sep = format!(
         "+-{}-+-{}-+-{}-+-{}-+-{}-+-{}-+",
@@ -190,14 +190,35 @@ pub async fn create(
     service_type: &str,
     version: &str,
     links: &[&str],
+    connection: Option<&str>,
 ) -> Result<(), String> {
+    if service_type == "postgres" && !links.is_empty() && connection.is_none() {
+        return Err(
+            "Missing --connection. Specify the connection profile for linked apps, for example --connection sync or --connection asyncpg"
+                .to_string(),
+        );
+    }
+
     let app_uuids = find_apps(links).await?;
 
-    let body = serde_json::json!({
+    let mut body = serde_json::json!({
         "display_name": display_name,
         "name": service_type,
         "version": version,
     });
+    if !app_uuids.is_empty() && connection.is_some() {
+        body["attachments"] = serde_json::json!(
+            app_uuids
+                .iter()
+                .map(|application_id| {
+                    serde_json::json!({
+                        "application_id": application_id,
+                        "connection_profile": connection.expect("checked above"),
+                    })
+                })
+                .collect::<Vec<_>>()
+        );
+    }
 
     let project = require_project()?;
     let pb = spinner(&format!("Creating resource {}...", display_name));
@@ -235,7 +256,20 @@ pub async fn create(
 
     if !app_uuids.is_empty() {
         let url = resource_url(&resource_id, None)?;
-        let link_body = serde_json::json!({ "application_ids": app_uuids });
+        let link_body = match connection {
+            Some(connection) => serde_json::json!({
+                "attachments": app_uuids
+                    .iter()
+                    .map(|application_id| {
+                        serde_json::json!({
+                            "application_id": application_id,
+                            "connection_profile": connection,
+                        })
+                    })
+                    .collect::<Vec<_>>()
+            }),
+            None => serde_json::json!({ "application_ids": app_uuids }),
+        };
         let link_resp = client
             .patch(url)
             .json(&link_body)
@@ -342,8 +376,21 @@ pub async fn delete(display_name: &str) -> Result<(), String> {
 }
 
 // PATCH /resource/{id} — update version and/or linked apps
-pub async fn edit(display_name: &str, version: Option<&str>, links: &[&str]) -> Result<(), String> {
+pub async fn edit(
+    display_name: &str,
+    version: Option<&str>,
+    links: &[&str],
+    connection: Option<&str>,
+) -> Result<(), String> {
     let resource = find_resource(display_name).await?;
+
+    if resource.name == "postgres" && !links.is_empty() && connection.is_none() {
+        return Err(
+            "Missing --connection. Specify the connection profile for linked apps, for example --connection sync or --connection asyncpg"
+                .to_string(),
+        );
+    }
+
     let pb = spinner(&format!("Updating {}...", display_name));
     let url = resource_url(&resource.id, None)?;
 
@@ -359,7 +406,20 @@ pub async fn edit(display_name: &str, version: Option<&str>, links: &[&str]) -> 
                 ids.push(uuid);
             }
         }
-        body["application_ids"] = serde_json::json!(ids);
+        if let Some(connection) = connection {
+            body["attachments"] = serde_json::json!(
+                ids.iter()
+                    .map(|application_id| {
+                        serde_json::json!({
+                            "application_id": application_id,
+                            "connection_profile": connection,
+                        })
+                    })
+                    .collect::<Vec<_>>()
+            );
+        } else {
+            body["application_ids"] = serde_json::json!(ids);
+        }
     }
 
     let client = reqwest::Client::new();
@@ -384,9 +444,22 @@ pub async fn edit(display_name: &str, version: Option<&str>, links: &[&str]) -> 
 }
 
 // PATCH /resource/{id} — link to one or more applications
-pub async fn attach(display_name: &str, apps: &[&str]) -> Result<(), String> {
-    let new_uuids = find_apps(apps).await?;
+pub async fn attach(
+    display_name: &str,
+    apps: &[&str],
+    connection: Option<&str>,
+) -> Result<(), String> {
+    if apps.is_empty() {
+        return Err("Specify at least one --app to attach".to_string());
+    }
     let resource = find_resource(display_name).await?;
+    if resource.name == "postgres" && connection.is_none() {
+        return Err(
+            "Missing --connection. Specify the connection profile for attached apps, for example --connection sync or --connection asyncpg"
+                .to_string(),
+        );
+    }
+    let new_uuids = find_apps(apps).await?;
     let pb = spinner(&format!("Attaching {}...", display_name));
     let url = resource_url(&resource.id, None)?;
 
@@ -397,7 +470,20 @@ pub async fn attach(display_name: &str, apps: &[&str]) -> Result<(), String> {
         }
     }
 
-    let body = serde_json::json!({ "application_ids": ids });
+    let body = match connection {
+        Some(connection) => serde_json::json!({
+            "attachments": ids
+                .iter()
+                .map(|application_id| {
+                    serde_json::json!({
+                        "application_id": application_id,
+                        "connection_profile": connection,
+                    })
+                })
+                .collect::<Vec<_>>()
+        }),
+        None => serde_json::json!({ "application_ids": ids }),
+    };
 
     let client = reqwest::Client::new();
     let resp = client
