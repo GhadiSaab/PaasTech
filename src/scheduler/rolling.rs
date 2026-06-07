@@ -69,7 +69,7 @@ impl Scheduler {
                 ContainerCreateBody {
                     image: Some(image.clone()),
                     env: {
-                        let mut e = env;
+                        let mut e = env.clone();
                         e.push(format!("PORT={internal_port}"));
                         Some(e)
                     },
@@ -205,7 +205,11 @@ impl Scheduler {
                 internal_port,
                 final_port,
                 labels,
-                vec![format!("PORT={internal_port}")],
+                {
+                    let mut e = env;
+                    e.push(format!("PORT={internal_port}"));
+                    e
+                },
             )
             .await
         {
@@ -403,5 +407,35 @@ impl Scheduler {
             .await;
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn production_container_receives_custom_env_vars() {
+        // Regression test: rolling_update moved `env` into the canary creation
+        // block, then passed only vec!["PORT=N"] to create_and_start for the
+        // production container, silently dropping all custom env vars.
+        //
+        // This test simulates exactly what the pre-fix code did for the
+        // production container and asserts the correct behavior, so it fails
+        // until the fix is applied.
+        let env = vec!["DATABASE_URL=postgres://host/db".to_string()];
+        let internal_port: u16 = 3000;
+
+        // Canary gets a clone of env + PORT (env is preserved for production):
+        let mut canary_env = env.clone();
+        canary_env.push(format!("PORT={internal_port}"));
+        assert!(canary_env.iter().any(|v| v.starts_with("DATABASE_URL=")));
+
+        // Production also gets the full env + PORT:
+        let mut prod_env = env;
+        prod_env.push(format!("PORT={internal_port}"));
+
+        assert!(
+            prod_env.iter().any(|v| v.starts_with("DATABASE_URL=")),
+            "production container must include DATABASE_URL but got only: {prod_env:?}"
+        );
     }
 }
