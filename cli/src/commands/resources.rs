@@ -188,7 +188,7 @@ fn print_table(resources: &[Resource]) {
 pub async fn create(
     display_name: &str,
     service_type: &str,
-    version: &str,
+    version: Option<&str>,
     links: &[&str],
     connection: Option<&str>,
 ) -> Result<(), String> {
@@ -204,8 +204,10 @@ pub async fn create(
     let mut body = serde_json::json!({
         "display_name": display_name,
         "name": service_type,
-        "version": version,
     });
+    if let Some(version) = version {
+        body["version"] = serde_json::Value::String(version.to_string());
+    }
     if !app_uuids.is_empty() && connection.is_some() {
         body["attachments"] = serde_json::json!(
             app_uuids
@@ -246,6 +248,11 @@ pub async fn create(
             pb.finish_and_clear();
             let text = resp.text().await.unwrap_or_default();
             return Err(format!("Invalid request: {}", text));
+        }
+        409 => {
+            pb.finish_and_clear();
+            let text = resp.text().await.unwrap_or_default();
+            return Err(text);
         }
         code => {
             pb.finish_and_clear();

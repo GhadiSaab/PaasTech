@@ -178,6 +178,10 @@ pub fn service_port_for_service(name: &str) -> u16 {
     REGISTRY.get(name).expect("Unknown service").port
 }
 
+pub fn default_version_for_service(_name: &str) -> &'static str {
+    "latest"
+}
+
 pub fn connection_profiles_for_service(name: &str) -> Vec<&'static str> {
     let mut profiles: Vec<&'static str> = REGISTRY
         .get(name)

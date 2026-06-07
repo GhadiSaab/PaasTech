@@ -159,7 +159,7 @@ enum ResourceCommands {
         r#type: String,
         /// Docker Hub version tag
         #[arg(long)]
-        version: String,
+        version: Option<String>,
         /// Application name to link at creation (repeatable)
         #[arg(long)]
         link: Vec<String>,
@@ -296,7 +296,14 @@ async fn main() {
                 connection,
             } => {
                 let refs: Vec<&str> = link.iter().map(|s| s.as_str()).collect();
-                resources::create(&name, &r#type, &version, &refs, connection.as_deref()).await
+                resources::create(
+                    &name,
+                    &r#type,
+                    version.as_deref(),
+                    &refs,
+                    connection.as_deref(),
+                )
+                .await
             }
             ResourceCommands::List => resources::list().await,
             ResourceCommands::Info { name } => resources::info(&name).await,

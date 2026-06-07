@@ -28,7 +28,7 @@ pub struct ResourceAttachment {
 pub struct CreateResourcePayload {
     pub display_name: String,
     pub name: String,
-    pub version: String,
+    pub version: Option<String>,
     pub application_id: Option<String>,
     pub connection_profile: Option<String>,
     pub attachments: Option<Vec<ResourceAttachment>>,

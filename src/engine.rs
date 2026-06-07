@@ -52,10 +52,21 @@ pub struct ProcessDefinition {
     pub build_env: HashMap<String, String>,
 }
 
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct ResourceDefinition {
+    pub name: String,
+    #[serde(rename = "type")]
+    pub service_type: String,
+    pub version: Option<String>,
+    pub connection: Option<String>,
+}
+
 #[derive(Debug, Deserialize)]
 struct PaastechManifest {
     #[serde(default)]
     processes: Vec<ProcessDefinition>,
+    #[serde(default)]
+    resources: Vec<ResourceDefinition>,
 }
 
 pub async fn save_multipart_file(mut payload: Multipart) -> Result<MultipartData, Error> {
@@ -142,6 +153,31 @@ pub fn load_process_definitions(
     Ok(manifest.processes)
 }
 
+pub fn load_resource_definitions(root: &Path) -> Result<Vec<ResourceDefinition>, String> {
+    let manifest_path = root.join("paastech.toml");
+    if !manifest_path.is_file() {
+        return Ok(Vec::new());
+    }
+
+    let manifest = std::fs::read_to_string(&manifest_path)
+        .map_err(|e| format!("Failed to read {}: {e}", manifest_path.display()))?;
+    let manifest: PaastechManifest =
+        toml::from_str(&manifest).map_err(|e| format!("Invalid paastech.toml: {e}"))?;
+
+    let mut seen_names = std::collections::HashSet::new();
+    for resource in &manifest.resources {
+        validate_resource_definition(resource)?;
+        if !seen_names.insert(resource.name.as_str()) {
+            return Err(format!(
+                "paastech.toml contains duplicate resource name '{}'",
+                resource.name
+            ));
+        }
+    }
+
+    Ok(manifest.resources)
+}
+
 fn validate_process_definition(root: &Path, process: &ProcessDefinition) -> Result<(), String> {
     if process.name.trim().is_empty() {
         return Err("process name cannot be empty".to_string());
@@ -200,6 +236,52 @@ fn validate_process_definition(root: &Path, process: &ProcessDefinition) -> Resu
         }
     }
 
+    Ok(())
+}
+
+fn validate_resource_definition(resource: &ResourceDefinition) -> Result<(), String> {
+    if resource.name.trim().is_empty() {
+        return Err("resource name cannot be empty".to_string());
+    }
+    if resource
+        .name
+        .chars()
+        .any(|c| !(c.is_ascii_alphanumeric() || c == '-'))
+    {
+        return Err(format!(
+            "resource '{}' must only contain letters, numbers, and hyphens",
+            resource.name
+        ));
+    }
+    if resource.service_type.trim().is_empty() {
+        return Err(format!("resource '{}' type cannot be empty", resource.name));
+    }
+    if resource
+        .service_type
+        .chars()
+        .any(|c| !(c.is_ascii_alphanumeric() || c == '-'))
+    {
+        return Err(format!(
+            "resource '{}' type must only contain letters, numbers, and hyphens",
+            resource.name
+        ));
+    }
+    if let Some(version) = resource.version.as_deref()
+        && (version.trim().is_empty() || version.contains(char::is_whitespace))
+    {
+        return Err(format!(
+            "resource '{}' version must not be empty or contain whitespace",
+            resource.name
+        ));
+    }
+    if let Some(connection) = resource.connection.as_deref()
+        && (connection.trim().is_empty() || connection.contains(char::is_whitespace))
+    {
+        return Err(format!(
+            "resource '{}' connection must not be empty or contain whitespace",
+            resource.name
+        ));
+    }
     Ok(())
 }
 
@@ -356,6 +438,39 @@ port = 3000
         assert_eq!(processes[0].process_type, ProcessType::Web);
         assert_eq!(processes[0].path, "api");
         assert_eq!(processes[0].port, Some(3000));
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn manifest_can_include_resources() {
+        let root = temp_project();
+        fs::write(
+            root.join("paastech.toml"),
+            r#"
+[project]
+name = "demo"
+
+[[resources]]
+name = "cache"
+type = "redis"
+
+[[resources]]
+name = "db"
+type = "postgres"
+version = "16"
+connection = "asyncpg"
+"#,
+        )
+        .unwrap();
+
+        let resources = load_resource_definitions(&root).unwrap();
+
+        assert_eq!(resources.len(), 2);
+        assert_eq!(resources[0].name, "cache");
+        assert_eq!(resources[0].service_type, "redis");
+        assert_eq!(resources[0].version, None);
+        assert_eq!(resources[1].connection.as_deref(), Some("asyncpg"));
 
         fs::remove_dir_all(root).unwrap();
     }

@@ -7,10 +7,11 @@ use uuid::Uuid;
 
 use crate::docker::{
     connection_env_vars_for_service, container_image_for_service, default_env_vars_for_service,
-    docker_image_for_service, is_valid_service, prepare_config_for_service,
-    service_port_for_service, valid_services, validate_connection_profile_for_service,
-    validate_docker_tag,
+    default_version_for_service, docker_image_for_service, is_valid_service,
+    prepare_config_for_service, service_port_for_service, valid_services,
+    validate_connection_profile_for_service, validate_docker_tag,
 };
+use crate::engine::ResourceDefinition;
 use crate::extractor::ProjectScope;
 use crate::models::{CreateResourcePayload, Resource, ResourceAttachment, UpdateResourcePayload};
 use crate::registry::Registry;
@@ -36,6 +37,18 @@ async fn fetch_resource_env_vars(
         .into_iter()
         .map(|r| format!("{}={}", r.key, r.value))
         .collect())
+}
+
+fn map_resource_insert_error(err: sqlx::Error, display_name: &str) -> actix_web::Error {
+    if let sqlx::Error::Database(db_err) = &err
+        && db_err.constraint() == Some("services_project_id_display_name_key")
+    {
+        return error::ErrorConflict(format!(
+            "Resource '{}' already exists in this project",
+            display_name
+        ));
+    }
+    error::ErrorInternalServerError(err)
 }
 
 async fn inject_service_env_into_app(
@@ -207,6 +220,193 @@ async fn ensure_attached_service_network(
     Ok(())
 }
 
+pub async fn ensure_manifest_resource_attached(
+    pool: &PgPool,
+    client: &Client,
+    scheduler: &Scheduler,
+    project_id: Uuid,
+    project_network: &str,
+    application_id: Uuid,
+    resource: &ResourceDefinition,
+) -> Result<(), actix_web::Error> {
+    if !is_valid_service(&resource.service_type) {
+        return Err(error::ErrorBadRequest(format!(
+            "Invalid service name '{}'. Must be one of: {}",
+            resource.service_type,
+            valid_services().join(", ")
+        )));
+    }
+
+    validate_connection_profile_for_service(&resource.service_type, resource.connection.as_deref())
+        .map_err(error::ErrorBadRequest)?;
+
+    let version = resource
+        .version
+        .clone()
+        .unwrap_or_else(|| default_version_for_service(&resource.service_type).to_string());
+    let docker_image = docker_image_for_service(&resource.service_type);
+    validate_docker_tag(client, docker_image, &version).await?;
+
+    let existing = sqlx::query(
+        "SELECT id, name, version, status, container_id, port FROM services WHERE project_id = $1 AND display_name = $2",
+    )
+    .bind(project_id)
+    .bind(&resource.name)
+    .fetch_optional(pool)
+    .await
+    .map_err(error::ErrorInternalServerError)?;
+
+    let service_id;
+    let mut status;
+    let port;
+    let service_env_map: HashMap<String, String>;
+
+    if let Some(existing) = existing {
+        let existing_name: String = existing
+            .try_get("name")
+            .map_err(error::ErrorInternalServerError)?;
+        if existing_name != resource.service_type {
+            return Err(error::ErrorConflict(format!(
+                "Resource '{}' already exists with type '{}', not '{}'",
+                resource.name, existing_name, resource.service_type
+            )));
+        }
+        service_id = existing
+            .try_get("id")
+            .map_err(error::ErrorInternalServerError)?;
+        status = existing
+            .try_get("status")
+            .map_err(error::ErrorInternalServerError)?;
+        port = existing
+            .try_get::<Option<i32>, _>("port")
+            .map_err(error::ErrorInternalServerError)?;
+        service_env_map =
+            sqlx::query("SELECT key, value FROM service_env_vars WHERE service_id = $1")
+                .bind(service_id)
+                .fetch_all(pool)
+                .await
+                .map_err(error::ErrorInternalServerError)?
+                .into_iter()
+                .map(|row| {
+                    Ok((
+                        row.try_get("key")
+                            .map_err(error::ErrorInternalServerError)?,
+                        row.try_get("value")
+                            .map_err(error::ErrorInternalServerError)?,
+                    ))
+                })
+                .collect::<Result<HashMap<String, String>, actix_web::Error>>()?;
+    } else {
+        service_id = Uuid::new_v4();
+        let default_env = default_env_vars_for_service(&resource.service_type);
+        service_env_map = default_env.iter().cloned().collect();
+
+        let mut tx = pool
+            .begin()
+            .await
+            .map_err(error::ErrorInternalServerError)?;
+        sqlx::query(
+            "INSERT INTO services (id, project_id, display_name, name, version) VALUES ($1, $2, $3, $4, $5)",
+        )
+        .bind(service_id)
+        .bind(project_id)
+        .bind(&resource.name)
+        .bind(&resource.service_type)
+        .bind(&version)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| map_resource_insert_error(e, &resource.name))?;
+
+        for (key, value) in &default_env {
+            sqlx::query!(
+                "INSERT INTO service_env_vars (service_id, key, value) VALUES ($1, $2, $3)",
+                service_id,
+                key,
+                value,
+            )
+            .execute(&mut *tx)
+            .await
+            .map_err(error::ErrorInternalServerError)?;
+        }
+        tx.commit().await.map_err(error::ErrorInternalServerError)?;
+        status = "stopped".to_string();
+        port = None;
+    }
+
+    if status != "running" {
+        let image = format!(
+            "{}:{}",
+            container_image_for_service(&resource.service_type),
+            version
+        );
+        let container_port = service_port_for_service(&resource.service_type);
+        let existing_port = port.map(|p| p as u16);
+        let env_vars: Vec<String> = service_env_map
+            .iter()
+            .map(|(key, value)| format!("{key}={value}"))
+            .collect();
+        let binds = prepare_config_for_service(&resource.service_type, &service_id.to_string())
+            .map_err(error::ErrorInternalServerError)?;
+        let (container_id, host_port) = scheduler
+            .start_service(
+                &service_id.to_string(),
+                project_network,
+                &image,
+                container_port,
+                existing_port,
+                env_vars,
+                binds,
+            )
+            .await
+            .map_err(|e| {
+                error::ErrorInternalServerError(format!("Failed to start service: {e}"))
+            })?;
+
+        sqlx::query!(
+            "UPDATE services SET status = 'running', container_id = $1, port = $2 WHERE id = $3",
+            container_id,
+            host_port as i32,
+            service_id,
+        )
+        .execute(pool)
+        .await
+        .map_err(error::ErrorInternalServerError)?;
+        status = "running".to_string();
+    }
+
+    if status == "running" {
+        let mut tx = pool
+            .begin()
+            .await
+            .map_err(error::ErrorInternalServerError)?;
+        sqlx::query(
+            "INSERT INTO application_services (application_id, service_id, connection_profile) VALUES ($1, $2, $3) ON CONFLICT (application_id, service_id) DO UPDATE SET connection_profile = EXCLUDED.connection_profile",
+        )
+        .bind(application_id)
+        .bind(service_id)
+        .bind(resource.connection.as_deref().unwrap_or_default())
+        .execute(&mut *tx)
+        .await
+        .map_err(error::ErrorInternalServerError)?;
+
+        inject_service_env_into_app(
+            &mut tx,
+            application_id,
+            &resource.service_type,
+            &service_id.to_string(),
+            service_port_for_service(&resource.service_type),
+            &service_env_map,
+            resource.connection.as_deref(),
+        )
+        .await
+        .map_err(error::ErrorInternalServerError)?;
+        tx.commit().await.map_err(error::ErrorInternalServerError)?;
+    }
+
+    ensure_attached_service_network(pool, scheduler, service_id, &[application_id]).await?;
+    Ok(())
+}
+
 const RESOURCE_LIST_QUERY: &str = r#"SELECT
     s.id::text as id,
     s.project_id::text as project_id,
@@ -246,8 +446,12 @@ pub async fn create(
         )));
     }
 
+    let version = payload
+        .version
+        .clone()
+        .unwrap_or_else(|| default_version_for_service(&payload.name).to_string());
     let docker_image = docker_image_for_service(&payload.name);
-    validate_docker_tag(&client, docker_image, &payload.version).await?;
+    validate_docker_tag(&client, docker_image, &version).await?;
 
     let id = Uuid::new_v4();
     let attachments = resource_attachments_from_payload(
@@ -270,10 +474,10 @@ pub async fn create(
     .bind(scope.project.id)
     .bind(&payload.display_name)
     .bind(&payload.name)
-    .bind(&payload.version)
+    .bind(&version)
     .execute(&mut *tx)
     .await
-    .map_err(error::ErrorInternalServerError)?;
+    .map_err(|e| map_resource_insert_error(e, &payload.display_name))?;
 
     for attachment in &attachments {
         let app_uuid = Uuid::parse_str(&attachment.application_id)
@@ -302,11 +506,7 @@ pub async fn create(
         .map_err(error::ErrorInternalServerError)?;
     }
 
-    let image = format!(
-        "{}:{}",
-        container_image_for_service(&payload.name),
-        payload.version
-    );
+    let image = format!("{}:{}", container_image_for_service(&payload.name), version);
     let container_port = service_port_for_service(&payload.name);
     let env_vars: Vec<String> = default_env
         .iter()
@@ -367,7 +567,7 @@ pub async fn create(
         project_id: scope.project.id.to_string(),
         display_name: payload.display_name.clone(),
         name: payload.name.clone(),
-        version: payload.version.clone(),
+        version,
         status: "running".to_string(),
         application_ids: attachments
             .iter()
