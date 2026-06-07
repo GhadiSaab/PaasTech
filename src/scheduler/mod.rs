@@ -395,9 +395,14 @@ impl Scheduler {
     ) -> Result<(), bollard::errors::Error> {
         let container_name =
             std::env::var("TRAEFIK_CONTAINER").unwrap_or_else(|_| "paastech-traefik-1".to_string());
-        match self.ensure_container_on_network(network_name, &container_name).await {
+        match self
+            .ensure_container_on_network(network_name, &container_name)
+            .await
+        {
             Ok(()) => Ok(()),
-            Err(bollard::errors::Error::DockerResponseServerError { status_code: 404, .. }) => Ok(()),
+            Err(bollard::errors::Error::DockerResponseServerError {
+                status_code: 404, ..
+            }) => Ok(()),
             Err(e) => Err(e),
         }
     }
