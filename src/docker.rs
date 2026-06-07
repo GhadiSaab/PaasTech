@@ -11,7 +11,13 @@ struct ServiceConfig {
     container_image: String,
     port: u16,
     env_vars: Vec<EnvVarSpec>,
+    connection_profiles: Option<HashMap<String, ConnectionProfileConfig>>,
     config_file: Option<ConfigFileSpec>,
+}
+
+#[derive(Deserialize)]
+struct ConnectionProfileConfig {
+    url_scheme: String,
 }
 
 #[derive(Deserialize)]
@@ -103,13 +109,29 @@ pub fn default_env_vars_for_service(name: &str) -> Vec<(String, String)> {
 
 pub fn connection_env_vars_for_service(
     name: &str,
-    host_port: u16,
+    service_host: &str,
+    service_port: u16,
     service_env: &HashMap<String, String>,
-) -> Vec<(String, String)> {
-    let localhost = "localhost".to_string();
-    let port_str = host_port.to_string();
+) -> Result<Vec<(String, String)>, String> {
+    let host = service_host.to_string();
+    let port_str = service_port.to_string();
     match name {
         "postgres" => {
+            let Some(connection_profile) = service_env.get("PAASTECH_CONNECTION_PROFILE") else {
+                let available = connection_profiles_for_service(name).join(", ");
+                return Err(format!(
+                    "Resource type 'postgres' requires a connection profile. Specify one of: {}",
+                    available
+                ));
+            };
+            validate_connection_profile_for_service(name, Some(connection_profile))?;
+            let scheme = REGISTRY
+                .get(name)
+                .and_then(|config| config.connection_profiles.as_ref())
+                .and_then(|profiles| profiles.get(connection_profile))
+                .expect("validated connection profile")
+                .url_scheme
+                .as_str();
             let user = service_env
                 .get("POSTGRES_USER")
                 .map_or("postgres", String::as_str);
@@ -119,46 +141,91 @@ pub fn connection_env_vars_for_service(
             let db = service_env
                 .get("POSTGRES_DB")
                 .map_or("postgres", String::as_str);
-            vec![
-                ("POSTGRES_HOST".into(), localhost),
+            let database_url = format!(
+                "{}://{}:{}@{}:{}/{}",
+                scheme, user, password, service_host, service_port, db
+            );
+            Ok(vec![
+                ("POSTGRES_HOST".into(), host.clone()),
                 ("POSTGRES_PORT".into(), port_str),
-                (
-                    "DATABASE_URL".into(),
-                    format!(
-                        "postgresql://{}:{}@localhost:{}/{}",
-                        user, password, host_port, db
-                    ),
-                ),
-            ]
+                ("DATABASE_URL".into(), database_url),
+            ])
         }
-        "redis" => {
-            let password = service_env.get("REDIS_PASSWORD").map_or("", String::as_str);
-            vec![
-                ("REDIS_HOST".into(), localhost),
-                ("REDIS_PORT".into(), port_str),
-                (
-                    "REDIS_URL".into(),
-                    format!("redis://:{}@localhost:{}", password, host_port),
-                ),
-            ]
-        }
-        "s3" => vec![
-            ("S3_HOST".into(), localhost),
+        "redis" => Ok(vec![
+            ("REDIS_HOST".into(), host.clone()),
+            ("REDIS_PORT".into(), port_str),
+            (
+                "REDIS_URL".into(),
+                format!("redis://{}:{}/0", service_host, service_port),
+            ),
+        ]),
+        "s3" => Ok(vec![
+            ("S3_HOST".into(), host.clone()),
             ("S3_PORT".into(), port_str),
             (
                 "S3_ENDPOINT_URL".into(),
-                format!("http://localhost:{}", host_port),
+                format!("http://{}:{}", service_host, service_port),
             ),
-        ],
-        _ => vec![
-            (format!("{}_HOST", name.to_uppercase()), localhost),
+        ]),
+        _ => Ok(vec![
+            (format!("{}_HOST", name.to_uppercase()), host),
             (format!("{}_PORT", name.to_uppercase()), port_str),
-        ],
+        ]),
     }
 }
 
 pub fn service_port_for_service(name: &str) -> u16 {
     REGISTRY.get(name).expect("Unknown service").port
+}
+
+pub fn default_version_for_service(_name: &str) -> &'static str {
+    "latest"
+}
+
+pub fn connection_profiles_for_service(name: &str) -> Vec<&'static str> {
+    let mut profiles: Vec<&'static str> = REGISTRY
+        .get(name)
+        .expect("Unknown service")
+        .connection_profiles
+        .as_ref()
+        .map(|profiles| profiles.keys().map(|s| s.as_str()).collect())
+        .unwrap_or_default();
+    profiles.sort();
+    profiles
+}
+
+pub fn validate_connection_profile_for_service(
+    name: &str,
+    connection_profile: Option<&str>,
+) -> Result<(), String> {
+    let config = REGISTRY.get(name).expect("Unknown service");
+    let Some(profiles) = &config.connection_profiles else {
+        if let Some(profile) = connection_profile {
+            return Err(format!(
+                "Resource type '{}' does not support connection profile '{}'",
+                name, profile
+            ));
+        }
+        return Ok(());
+    };
+
+    let Some(profile) = connection_profile else {
+        let available = connection_profiles_for_service(name).join(", ");
+        return Err(format!(
+            "Resource type '{}' requires a connection profile. Specify one of: {}",
+            name, available
+        ));
+    };
+
+    if !profiles.contains_key(profile) {
+        let available = connection_profiles_for_service(name).join(", ");
+        return Err(format!(
+            "Invalid connection profile '{}' for resource type '{}'. Specify one of: {}",
+            profile, name, available
+        ));
+    }
+
+    Ok(())
 }
 
 pub async fn validate_docker_tag(client: &Client, image: &str, tag: &str) -> Result<(), Error> {
@@ -222,4 +289,79 @@ struct DockerTagsResponse {
 #[derive(Deserialize)]
 struct DockerTag {
     name: String,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn postgres_attachment_uses_requested_database_url_profile() {
+        let mut env = HashMap::from([
+            ("POSTGRES_USER".to_string(), "postgres".to_string()),
+            ("POSTGRES_PASSWORD".to_string(), "postgres".to_string()),
+            ("POSTGRES_DB".to_string(), "postgres".to_string()),
+        ]);
+        env.insert(
+            "PAASTECH_CONNECTION_PROFILE".to_string(),
+            "sync".to_string(),
+        );
+
+        let vars: HashMap<_, _> =
+            connection_env_vars_for_service("postgres", "pg-service", 5432, &env)
+                .expect("sync profile should be valid")
+                .into_iter()
+                .collect();
+
+        assert_eq!(
+            vars.get("DATABASE_URL").map(String::as_str),
+            Some("postgresql://postgres:postgres@pg-service:5432/postgres")
+        );
+        assert!(!vars.contains_key("DATABASE_ASYNC_URL"));
+        assert!(!vars.contains_key("DATABASE_SYNC_URL"));
+
+        env.insert(
+            "PAASTECH_CONNECTION_PROFILE".to_string(),
+            "asyncpg".to_string(),
+        );
+        let vars: HashMap<_, _> =
+            connection_env_vars_for_service("postgres", "pg-service", 5432, &env)
+                .expect("asyncpg profile should be valid")
+                .into_iter()
+                .collect();
+        assert_eq!(
+            vars.get("DATABASE_URL").map(String::as_str),
+            Some("postgresql+asyncpg://postgres:postgres@pg-service:5432/postgres")
+        );
+    }
+
+    #[test]
+    fn postgres_attachment_requires_connection_profile() {
+        let env = HashMap::from([
+            ("POSTGRES_USER".to_string(), "postgres".to_string()),
+            ("POSTGRES_PASSWORD".to_string(), "postgres".to_string()),
+            ("POSTGRES_DB".to_string(), "postgres".to_string()),
+        ]);
+
+        let err = connection_env_vars_for_service("postgres", "pg-service", 5432, &env)
+            .expect_err("missing profile should fail");
+
+        assert!(err.contains("requires a connection profile"));
+    }
+
+    #[test]
+    fn redis_attachment_uses_unauthenticated_default_url() {
+        let env = HashMap::new();
+
+        let vars: HashMap<_, _> =
+            connection_env_vars_for_service("redis", "redis-service", 6379, &env)
+                .expect("redis should not require a connection profile")
+                .into_iter()
+                .collect();
+
+        assert_eq!(
+            vars.get("REDIS_URL").map(String::as_str),
+            Some("redis://redis-service:6379/0")
+        );
+    }
 }
