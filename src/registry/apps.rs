@@ -3,6 +3,30 @@ use uuid::Uuid;
 
 use super::{App, Registry, models::DEFAULT_PROJECT_ID};
 
+const APP_SELECT_WITH_PRIMARY_PROCESS: &str = r#"
+    SELECT
+        a.id,
+        a.project_id,
+        a.name,
+        COALESCE(NULLIF(a.image_id, ''), primary_process.image_id) AS image_id,
+        COALESCE(NULLIF(a.container_id, ''), primary_process.container_id) AS container_id,
+        COALESCE(a.internal_port, primary_process.internal_port) AS internal_port,
+        COALESCE(NULLIF(a.port, 0), primary_process.host_port) AS port,
+        a.status,
+        a.base_domain,
+        a.created_at
+    FROM applications a
+    LEFT JOIN LATERAL (
+        SELECT image_id, container_id, internal_port, host_port
+        FROM application_processes
+        WHERE application_id = a.id
+        ORDER BY
+            CASE WHEN process_type = 'web' THEN 0 ELSE 1 END,
+            created_at ASC
+        LIMIT 1
+    ) primary_process ON true
+"#;
+
 impl Registry {
     #[allow(clippy::too_many_arguments)]
     pub async fn save_in_project(
@@ -67,13 +91,9 @@ impl Registry {
         project_id: Uuid,
         name: &str,
     ) -> Result<Option<App>, sqlx::Error> {
-        sqlx::query_as::<_, App>(
-            r#"
-            SELECT id, project_id, name, image_id, container_id, internal_port, port, status, base_domain, created_at
-            FROM applications
-            WHERE project_id = $1 AND name = $2
-            "#,
-        )
+        sqlx::query_as::<_, App>(&format!(
+            "{APP_SELECT_WITH_PRIMARY_PROCESS} WHERE a.project_id = $1 AND a.name = $2"
+        ))
         .bind(project_id)
         .bind(name)
         .fetch_optional(pool)
@@ -86,14 +106,9 @@ impl Registry {
     }
 
     pub async fn list_in_project(pool: &PgPool, project_id: Uuid) -> Result<Vec<App>, sqlx::Error> {
-        sqlx::query_as::<_, App>(
-            r#"
-            SELECT id, project_id, name, image_id, container_id, internal_port, port, status, base_domain, created_at
-            FROM applications
-            WHERE project_id = $1
-            ORDER BY created_at ASC
-            "#,
-        )
+        sqlx::query_as::<_, App>(&format!(
+            "{APP_SELECT_WITH_PRIMARY_PROCESS} WHERE a.project_id = $1 ORDER BY a.created_at ASC"
+        ))
         .bind(project_id)
         .fetch_all(pool)
         .await
@@ -105,13 +120,9 @@ impl Registry {
     }
 
     pub async fn list_all(pool: &PgPool) -> Result<Vec<App>, sqlx::Error> {
-        sqlx::query_as::<_, App>(
-            r#"
-            SELECT id, project_id, name, image_id, container_id, internal_port, port, status, base_domain, created_at
-            FROM applications
-            ORDER BY created_at ASC
-            "#,
-        )
+        sqlx::query_as::<_, App>(&format!(
+            "{APP_SELECT_WITH_PRIMARY_PROCESS} ORDER BY a.created_at ASC"
+        ))
         .fetch_all(pool)
         .await
     }
