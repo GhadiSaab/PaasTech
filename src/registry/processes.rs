@@ -59,6 +59,14 @@ impl Registry {
         .await
     }
 
+    pub async fn delete_processes(pool: &PgPool, application_id: Uuid) -> Result<(), sqlx::Error> {
+        sqlx::query("DELETE FROM application_processes WHERE application_id = $1")
+            .bind(application_id)
+            .execute(pool)
+            .await?;
+        Ok(())
+    }
+
     pub async fn list_active_processes(
         pool: &PgPool,
     ) -> Result<Vec<ActiveAppProcess>, sqlx::Error> {

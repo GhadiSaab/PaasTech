@@ -9,9 +9,10 @@ use uuid::Uuid;
 
 use crate::engine::{
     MultipartData, ProcessType, build_image_with_name, extract_zip, load_process_definitions,
-    save_multipart_file,
+    load_resource_definitions, save_multipart_file,
 };
 use crate::extractor::ProjectScope;
+use crate::handlers::resources::ensure_manifest_resource_attached;
 use crate::registry::Registry;
 use crate::scheduler::{Scheduler, app_container_name, app_process_container_name, find_free_port};
 
@@ -47,6 +48,19 @@ fn app_name_from_request(req: &HttpRequest) -> String {
         .get("app_name")
         .unwrap_or_default()
         .to_string()
+}
+
+fn validate_app_name(name: &str) -> Result<(), String> {
+    if name.trim().is_empty() {
+        return Err("app name cannot be empty".to_string());
+    }
+    if name
+        .chars()
+        .any(|c| !(c.is_ascii_alphanumeric() || c == '-'))
+    {
+        return Err("app name must only contain letters, numbers, and hyphens".to_string());
+    }
+    Ok(())
 }
 
 pub(super) async fn fetch_project_env_vars_db(
@@ -104,7 +118,15 @@ async fn handle_upload(
         .get("internal_port")
         .and_then(|p| p.trim().parse::<u16>().ok());
 
-    let name = format!("paastech-{}", Uuid::new_v4());
+    let name = data
+        .fields
+        .get("name")
+        .map(|name| name.trim().to_string())
+        .filter(|name| !name.is_empty())
+        .unwrap_or_else(|| format!("paastech-{}", Uuid::new_v4()));
+    if let Err(e) = validate_app_name(&name) {
+        return Ok(HttpResponse::BadRequest().json(json!({"error": e})));
+    }
 
     let extracted_folder = extract_zip(zip_filepath)
         .await
@@ -117,8 +139,61 @@ async fn handle_upload(
             return Ok(HttpResponse::BadRequest().json(json!({"error": e})));
         }
     };
+    let resources = match load_resource_definitions(&extracted_folder) {
+        Ok(resources) => resources,
+        Err(e) => {
+            let _ = fs::remove_dir_all(&extracted_folder).await;
+            return Ok(HttpResponse::BadRequest().json(json!({"error": e})));
+        }
+    };
 
-    let app = match Registry::save_in_project(
+    match Registry::get_in_project(&pool, project_id, &name).await {
+        Ok(Some(existing)) => {
+            match Registry::list_processes(&pool, existing.id).await {
+                Ok(processes) if !processes.is_empty() => {
+                    for process in processes {
+                        scheduler
+                            .stop(&app_process_container_name(
+                                existing.project_id,
+                                &name,
+                                &process.name,
+                            ))
+                            .await;
+                    }
+                }
+                Ok(_) => {
+                    if existing
+                        .container_id
+                        .as_deref()
+                        .is_some_and(|id| !id.is_empty())
+                    {
+                        scheduler
+                            .stop(&app_container_name(existing.project_id, &name))
+                            .await;
+                    }
+                }
+                Err(e) => {
+                    let _ = fs::remove_dir_all(&extracted_folder).await;
+                    return Ok(
+                        HttpResponse::InternalServerError().json(json!({"error": e.to_string()}))
+                    );
+                }
+            }
+            if let Err(e) = Registry::delete_processes(&pool, existing.id).await {
+                let _ = fs::remove_dir_all(&extracted_folder).await;
+                return Ok(
+                    HttpResponse::InternalServerError().json(json!({"error": e.to_string()}))
+                );
+            }
+        }
+        Ok(None) => {}
+        Err(e) => {
+            let _ = fs::remove_dir_all(&extracted_folder).await;
+            return Ok(HttpResponse::InternalServerError().json(json!({"error": e.to_string()})));
+        }
+    }
+
+    let app = match Registry::upsert_in_project(
         &pool,
         project_id,
         &name,
@@ -163,6 +238,25 @@ async fn handle_upload(
             }
         };
         process_rows.push(row);
+    }
+
+    let client = reqwest::Client::new();
+    for resource in &resources {
+        if let Err(e) = ensure_manifest_resource_attached(
+            &pool,
+            &client,
+            scheduler.get_ref(),
+            project_id,
+            &project_network,
+            app.id,
+            resource,
+        )
+        .await
+        {
+            let _ = fs::remove_dir_all(&extracted_folder).await;
+            let _ = Registry::update_status(&pool, project_id, &name, "failed").await;
+            return Err(e);
+        }
     }
 
     let pool_bg = pool.clone();

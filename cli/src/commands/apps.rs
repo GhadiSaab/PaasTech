@@ -22,6 +22,16 @@ struct App {
     created_at: Option<String>,
 }
 
+#[derive(Deserialize)]
+struct ProjectManifest {
+    project: ManifestProject,
+}
+
+#[derive(Deserialize)]
+struct ManifestProject {
+    name: String,
+}
+
 fn print_table(apps: &[App]) {
     let col_name = apps.iter().map(|a| a.name.len()).max().unwrap_or(4).max(4);
     let col_image = apps
@@ -276,7 +286,7 @@ pub async fn upload(source: &str) -> Result<(), String> {
         return Err("Source must be a .zip file".to_string());
     }
 
-    upload_archive(path, None).await
+    upload_archive(path, None, None).await
 }
 
 // GET /app/{name}/logs
@@ -305,14 +315,19 @@ pub async fn logs(name: &str, tail: Option<u32>) -> Result<(), String> {
 pub async fn deploy_current_dir(port: u16) -> Result<(), String> {
     let root = project_root()?;
     validate_source_project(&root)?;
+    let app_name = read_project_name(&root)?;
 
     let archive = package_project(&root)?;
-    let result = upload_archive(&archive, Some(port)).await;
+    let result = upload_archive(&archive, Some(port), Some(&app_name)).await;
     let _ = std::fs::remove_file(&archive);
     result
 }
 
-async fn upload_archive(path: &Path, fallback_port: Option<u16>) -> Result<(), String> {
+async fn upload_archive(
+    path: &Path,
+    fallback_port: Option<u16>,
+    app_name: Option<&str>,
+) -> Result<(), String> {
     let pb = spinner("Packaging and uploading...");
 
     let file_bytes = tokio::fs::read(path)
@@ -333,6 +348,9 @@ async fn upload_archive(path: &Path, fallback_port: Option<u16>) -> Result<(), S
     let mut form = reqwest::multipart::Form::new().part("file", part);
     if let Some(port) = fallback_port {
         form = form.text("internal_port", port.to_string());
+    }
+    if let Some(name) = app_name {
+        form = form.text("name", name.to_string());
     }
 
     let client = reqwest::Client::new();
@@ -432,6 +450,15 @@ fn validate_source_project(root: &Path) -> Result<(), String> {
     }
 
     Ok(())
+}
+
+fn read_project_name(root: &Path) -> Result<String, String> {
+    let manifest_path = root.join("paastech.toml");
+    let content = std::fs::read_to_string(&manifest_path)
+        .map_err(|e| format!("Failed to read {}: {e}", manifest_path.display()))?;
+    let manifest: ProjectManifest = toml::from_str(&content)
+        .map_err(|e| format!("Invalid {}: {e}", manifest_path.display()))?;
+    Ok(manifest.project.name)
 }
 
 fn package_project(root: &Path) -> Result<PathBuf, String> {
