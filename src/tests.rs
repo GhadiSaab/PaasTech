@@ -1,10 +1,13 @@
-use super::*;
-use crate::registry::Registry;
 use actix_web::test;
+use actix_web::{App, web};
 use reqwest::Client;
 use serde_json::json;
 use sqlx::PgPool;
 use uuid::Uuid;
+
+use crate::handlers;
+use crate::registry::Registry;
+use crate::scheduler::Scheduler;
 
 fn build_scheduler() -> web::Data<Scheduler> {
     web::Data::new(Scheduler::new())
@@ -81,7 +84,7 @@ async fn test_list_apps() {
         App::new()
             .app_data(build_scheduler())
             .app_data(pool)
-            .service(list_apps),
+            .service(web::scope("/app").service(handlers::apps::list)),
     )
     .await;
 
@@ -102,8 +105,11 @@ async fn test_deploy_app() {
         App::new()
             .app_data(scheduler.clone())
             .app_data(pool.clone())
-            .service(deploy_app)
-            .service(stop_app),
+            .service(
+                web::scope("/app")
+                    .service(handlers::apps::deploy)
+                    .service(handlers::apps::stop),
+            ),
     )
     .await;
 
@@ -146,7 +152,7 @@ async fn test_stop_app() {
         App::new()
             .app_data(scheduler)
             .app_data(pool.clone())
-            .service(stop_app),
+            .service(web::scope("/app").service(handlers::apps::stop)),
     )
     .await;
 
@@ -168,7 +174,7 @@ async fn test_stop_app_not_found() {
         App::new()
             .app_data(scheduler)
             .app_data(pool)
-            .service(stop_app),
+            .service(web::scope("/app").service(handlers::apps::stop)),
     )
     .await;
 
@@ -204,7 +210,7 @@ async fn test_restart_app() {
         App::new()
             .app_data(scheduler.clone())
             .app_data(pool.clone())
-            .service(restart_app),
+            .service(web::scope("/app").service(handlers::apps::restart)),
     )
     .await;
 
@@ -226,7 +232,7 @@ async fn test_restart_app_not_found() {
         App::new()
             .app_data(scheduler)
             .app_data(pool)
-            .service(restart_app),
+            .service(web::scope("/app").service(handlers::apps::restart)),
     )
     .await;
 
@@ -261,7 +267,7 @@ async fn test_status_app() {
         App::new()
             .app_data(scheduler.clone())
             .app_data(pool.clone())
-            .service(status_app),
+            .service(web::scope("/app").service(handlers::apps::status)),
     )
     .await;
 
@@ -272,8 +278,8 @@ async fn test_status_app() {
     assert_eq!(resp.status(), 200);
 
     let body = test::read_body(resp).await;
-    let status = String::from_utf8(body.to_vec()).unwrap();
-    assert!(!status.is_empty());
+    let status_str = String::from_utf8(body.to_vec()).unwrap();
+    assert!(!status_str.is_empty());
 
     cleanup_app(pool.get_ref(), app_name).await;
 }
@@ -287,7 +293,7 @@ async fn test_status_app_not_found() {
         App::new()
             .app_data(scheduler)
             .app_data(pool)
-            .service(status_app),
+            .service(web::scope("/app").service(handlers::apps::status)),
     )
     .await;
 
@@ -303,7 +309,12 @@ async fn test_status_app_not_found() {
 #[actix_web::test]
 async fn test_get_resources() {
     let pool = build_pool().await;
-    let app = test::init_service(App::new().app_data(pool).service(get_resources)).await;
+    let app = test::init_service(
+        App::new()
+            .app_data(pool)
+            .service(web::scope("/resource").service(handlers::resources::list)),
+    )
+    .await;
 
     let req = test::TestRequest::get().uri("/resource").to_request();
     let resp = test::call_service(&app, req).await;
@@ -319,7 +330,7 @@ async fn test_create_resource_invalid_service() {
             .app_data(pool)
             .app_data(build_client())
             .app_data(build_scheduler())
-            .service(create_resource),
+            .service(web::scope("/resource").service(handlers::resources::create)),
     )
     .await;
 
@@ -335,7 +346,7 @@ async fn test_create_resource_invalid_service() {
 async fn test_get_resource_not_found() {
     let pool = build_pool().await;
 
-    let app = test::init_service(App::new().app_data(pool).service(get_resource)).await;
+    let app = test::init_service(App::new().app_data(pool).service(handlers::resources::get)).await;
 
     let req = test::TestRequest::get()
         .uri(&format!("/resource/{}", Uuid::new_v4()))
@@ -348,7 +359,7 @@ async fn test_get_resource_not_found() {
 async fn test_get_resource_invalid_uuid() {
     let pool = build_pool().await;
 
-    let app = test::init_service(App::new().app_data(pool).service(get_resource)).await;
+    let app = test::init_service(App::new().app_data(pool).service(handlers::resources::get)).await;
 
     let req = test::TestRequest::get()
         .uri("/resource/not-a-uuid")
@@ -362,7 +373,12 @@ async fn test_get_resource() {
     let pool = build_pool().await;
     let id = insert_test_resource(pool.get_ref(), "Test Postgres", "postgres", "16").await;
 
-    let app = test::init_service(App::new().app_data(pool.clone()).service(get_resource)).await;
+    let app = test::init_service(
+        App::new()
+            .app_data(pool.clone())
+            .service(handlers::resources::get),
+    )
+    .await;
 
     let req = test::TestRequest::get()
         .uri(&format!("/resource/{}", id))
@@ -386,7 +402,8 @@ async fn test_update_resource_display_name() {
         App::new()
             .app_data(pool.clone())
             .app_data(build_client())
-            .service(update_resource),
+            .app_data(build_scheduler())
+            .service(handlers::resources::update),
     )
     .await;
 
@@ -408,7 +425,8 @@ async fn test_update_resource_not_found() {
         App::new()
             .app_data(pool)
             .app_data(build_client())
-            .service(update_resource),
+            .app_data(build_scheduler())
+            .service(handlers::resources::update),
     )
     .await;
 
@@ -429,7 +447,7 @@ async fn test_delete_resource() {
         App::new()
             .app_data(pool)
             .app_data(build_scheduler())
-            .service(delete_resource),
+            .service(handlers::resources::delete),
     )
     .await;
 
@@ -447,7 +465,15 @@ async fn test_delete_running_resource_removes_container() {
     let id = Uuid::new_v4();
 
     let (container_id, host_port) = scheduler
-        .start_service(&id.to_string(), "redis:7", 6379, None, vec![], vec![])
+        .start_service(
+            &id.to_string(),
+            crate::registry::DEFAULT_PROJECT_NETWORK,
+            "redis:7",
+            6379,
+            None,
+            vec![],
+            vec![],
+        )
         .await
         .unwrap();
 
@@ -465,7 +491,7 @@ async fn test_delete_running_resource_removes_container() {
         App::new()
             .app_data(pool.clone())
             .app_data(scheduler.clone())
-            .service(delete_resource),
+            .service(handlers::resources::delete),
     )
     .await;
 
@@ -487,7 +513,7 @@ async fn test_delete_resource_not_found() {
         App::new()
             .app_data(pool)
             .app_data(build_scheduler())
-            .service(delete_resource),
+            .service(handlers::resources::delete),
     )
     .await;
 
@@ -503,7 +529,12 @@ async fn test_get_resource_env() {
     let pool = build_pool().await;
     let id = insert_test_resource(pool.get_ref(), "Env Test", "redis", "7").await;
 
-    let app = test::init_service(App::new().app_data(pool.clone()).service(get_resource_env)).await;
+    let app = test::init_service(
+        App::new()
+            .app_data(pool.clone())
+            .service(handlers::resources::get_env),
+    )
+    .await;
 
     let req = test::TestRequest::get()
         .uri(&format!("/resource/{}/env", id))
@@ -525,8 +556,8 @@ async fn test_update_and_get_resource_env() {
     let app = test::init_service(
         App::new()
             .app_data(pool.clone())
-            .service(update_resource_env)
-            .service(get_resource_env),
+            .service(handlers::resources::update_env)
+            .service(handlers::resources::get_env),
     )
     .await;
 
@@ -558,7 +589,7 @@ async fn test_stop_resource_already_stopped() {
         App::new()
             .app_data(pool.clone())
             .app_data(scheduler)
-            .service(stop_resource),
+            .service(handlers::resources::stop),
     )
     .await;
 
@@ -589,7 +620,7 @@ async fn test_start_resource_already_running() {
         App::new()
             .app_data(pool.clone())
             .app_data(scheduler)
-            .service(start_resource),
+            .service(handlers::resources::start),
     )
     .await;
 
@@ -628,7 +659,7 @@ async fn test_delete_app() {
         App::new()
             .app_data(scheduler)
             .app_data(pool.clone())
-            .service(delete_app),
+            .service(web::scope("/app").service(handlers::apps::delete)),
     )
     .await;
 
@@ -648,7 +679,7 @@ async fn test_delete_app_not_found() {
         App::new()
             .app_data(scheduler)
             .app_data(pool)
-            .service(delete_app),
+            .service(web::scope("/app").service(handlers::apps::delete)),
     )
     .await;
 
@@ -665,7 +696,12 @@ async fn test_delete_app_not_found() {
 async fn test_get_app_env_not_found() {
     let pool = build_pool().await;
 
-    let app = test::init_service(App::new().app_data(pool).service(get_app_env)).await;
+    let app = test::init_service(
+        App::new()
+            .app_data(pool)
+            .service(web::scope("/app").service(handlers::apps::get_env)),
+    )
+    .await;
 
     let req = test::TestRequest::get()
         .uri("/app/nonexistent-app-xyz/env")
@@ -693,7 +729,12 @@ async fn test_get_app_env() {
     .await
     .unwrap();
 
-    let app = test::init_service(App::new().app_data(pool.clone()).service(get_app_env)).await;
+    let app = test::init_service(
+        App::new()
+            .app_data(pool.clone())
+            .service(web::scope("/app").service(handlers::apps::get_env)),
+    )
+    .await;
 
     let req = test::TestRequest::get()
         .uri(&format!("/app/{}/env", app_name))
@@ -711,7 +752,12 @@ async fn test_get_app_env() {
 async fn test_update_app_env_not_found() {
     let pool = build_pool().await;
 
-    let app = test::init_service(App::new().app_data(pool).service(update_app_env)).await;
+    let app = test::init_service(
+        App::new()
+            .app_data(pool)
+            .service(web::scope("/app").service(handlers::apps::update_env)),
+    )
+    .await;
 
     let req = test::TestRequest::put()
         .uri("/app/nonexistent-app-xyz/env")
@@ -741,10 +787,11 @@ async fn test_update_and_get_app_env() {
     .unwrap();
 
     let app = test::init_service(
-        App::new()
-            .app_data(pool.clone())
-            .service(update_app_env)
-            .service(get_app_env),
+        App::new().app_data(pool.clone()).service(
+            web::scope("/app")
+                .service(handlers::apps::update_env)
+                .service(handlers::apps::get_env),
+        ),
     )
     .await;
 
@@ -777,7 +824,7 @@ async fn test_logs_app_not_found() {
         App::new()
             .app_data(scheduler)
             .app_data(pool)
-            .service(logs_app),
+            .service(web::scope("/app").service(handlers::apps::logs)),
     )
     .await;
 
@@ -812,7 +859,7 @@ async fn test_logs_app_no_container() {
         App::new()
             .app_data(scheduler)
             .app_data(pool.clone())
-            .service(logs_app),
+            .service(web::scope("/app").service(handlers::apps::logs)),
     )
     .await;
 
@@ -834,7 +881,7 @@ async fn test_logs_resource_invalid_uuid() {
         App::new()
             .app_data(scheduler)
             .app_data(pool)
-            .service(logs_resource),
+            .service(handlers::resources::logs),
     )
     .await;
 
@@ -854,7 +901,7 @@ async fn test_logs_resource_not_found() {
         App::new()
             .app_data(scheduler)
             .app_data(pool)
-            .service(logs_resource),
+            .service(handlers::resources::logs),
     )
     .await;
 
@@ -875,7 +922,7 @@ async fn test_logs_resource_no_container() {
         App::new()
             .app_data(scheduler)
             .app_data(pool.clone())
-            .service(logs_resource),
+            .service(handlers::resources::logs),
     )
     .await;
 

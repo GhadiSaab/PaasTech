@@ -3,6 +3,10 @@
     "docker_image": "library/postgres",
     "container_image": "postgres",
     "port": 5432,
+    "connection_profiles": {
+      "sync": { "url_scheme": "postgresql" },
+      "asyncpg": { "url_scheme": "postgresql+asyncpg" }
+    },
     "env_vars": [
       { "key": "POSTGRES_USER", "value": "postgres" },
       { "key": "POSTGRES_PASSWORD", "value": "postgres" },

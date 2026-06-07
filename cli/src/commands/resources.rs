@@ -1,5 +1,6 @@
 use super::utils::{colored_status, spinner};
 use crate::api_base;
+use crate::commands::projects::{current_project, require_project};
 use colored::Colorize;
 use serde::Deserialize;
 use std::collections::HashMap;
@@ -19,7 +20,11 @@ async fn find_apps(names: &[&str]) -> Result<Vec<String>, String> {
         return Ok(Vec::new());
     }
 
-    let resp = reqwest::get(format!("{}/app", api_base()))
+    let url = match current_project()? {
+        Some(project) => format!("{}/project/{}/app", api_base(), project),
+        None => format!("{}/app", api_base()),
+    };
+    let resp = reqwest::get(url)
         .await
         .map_err(|e| format!("Request failed: {e}"))?;
 
@@ -58,7 +63,11 @@ fn resource_url(id: &str, action: Option<&str>) -> Result<reqwest::Url, String> 
 }
 
 async fn find_resource(name_or_id: &str) -> Result<Resource, String> {
-    let resp = reqwest::get(format!("{}/resource", api_base()))
+    let url = match current_project()? {
+        Some(project) => format!("{}/project/{}/resource", api_base(), project),
+        None => format!("{}/resource", api_base()),
+    };
+    let resp = reqwest::get(url)
         .await
         .map_err(|e| format!("Request failed: {e}"))?;
 
@@ -116,7 +125,7 @@ fn print_table(resources: &[Resource]) {
         .max()
         .unwrap_or(6)
         .max(6);
-    let col_links = 36_usize.max(11);
+    let col_links = 36_usize;
 
     let sep = format!(
         "+-{}-+-{}-+-{}-+-{}-+-{}-+-{}-+",
@@ -179,21 +188,45 @@ fn print_table(resources: &[Resource]) {
 pub async fn create(
     display_name: &str,
     service_type: &str,
-    version: &str,
+    version: Option<&str>,
     links: &[&str],
+    connection: Option<&str>,
 ) -> Result<(), String> {
+    if service_type == "postgres" && !links.is_empty() && connection.is_none() {
+        return Err(
+            "Missing --connection. Specify the connection profile for linked apps, for example --connection sync or --connection asyncpg"
+                .to_string(),
+        );
+    }
+
     let app_uuids = find_apps(links).await?;
 
-    let body = serde_json::json!({
+    let mut body = serde_json::json!({
         "display_name": display_name,
         "name": service_type,
-        "version": version,
     });
+    if let Some(version) = version {
+        body["version"] = serde_json::Value::String(version.to_string());
+    }
+    if !app_uuids.is_empty() && connection.is_some() {
+        body["attachments"] = serde_json::json!(
+            app_uuids
+                .iter()
+                .map(|application_id| {
+                    serde_json::json!({
+                        "application_id": application_id,
+                        "connection_profile": connection.expect("checked above"),
+                    })
+                })
+                .collect::<Vec<_>>()
+        );
+    }
 
+    let project = require_project()?;
     let pb = spinner(&format!("Creating resource {}...", display_name));
     let client = reqwest::Client::new();
     let resp = client
-        .post(format!("{}/resource", api_base()))
+        .post(format!("{}/project/{}/resource", api_base(), project))
         .json(&body)
         .send()
         .await
@@ -216,6 +249,11 @@ pub async fn create(
             let text = resp.text().await.unwrap_or_default();
             return Err(format!("Invalid request: {}", text));
         }
+        409 => {
+            pb.finish_and_clear();
+            let text = resp.text().await.unwrap_or_default();
+            return Err(text);
+        }
         code => {
             pb.finish_and_clear();
             let text = resp.text().await.unwrap_or_default();
@@ -225,7 +263,20 @@ pub async fn create(
 
     if !app_uuids.is_empty() {
         let url = resource_url(&resource_id, None)?;
-        let link_body = serde_json::json!({ "application_ids": app_uuids });
+        let link_body = match connection {
+            Some(connection) => serde_json::json!({
+                "attachments": app_uuids
+                    .iter()
+                    .map(|application_id| {
+                        serde_json::json!({
+                            "application_id": application_id,
+                            "connection_profile": connection,
+                        })
+                    })
+                    .collect::<Vec<_>>()
+            }),
+            None => serde_json::json!({ "application_ids": app_uuids }),
+        };
         let link_resp = client
             .patch(url)
             .json(&link_body)
@@ -250,7 +301,9 @@ pub async fn create(
 
 // GET /resource
 pub async fn list() -> Result<(), String> {
-    let resp = reqwest::get(format!("{}/resource", api_base()))
+    let project = require_project()?;
+    let url = format!("{}/project/{}/resource", api_base(), project);
+    let resp = reqwest::get(url)
         .await
         .map_err(|e| format!("Request failed: {e}"))?;
 
@@ -308,8 +361,8 @@ pub async fn info(display_name: &str) -> Result<(), String> {
 
 // DELETE /resource/{id}
 pub async fn delete(display_name: &str) -> Result<(), String> {
-    let pb = spinner(&format!("Deleting {}...", display_name));
     let resource = find_resource(display_name).await?;
+    let pb = spinner(&format!("Deleting {}...", display_name));
     let url = resource_url(&resource.id, None)?;
 
     let client = reqwest::Client::new();
@@ -330,9 +383,22 @@ pub async fn delete(display_name: &str) -> Result<(), String> {
 }
 
 // PATCH /resource/{id} — update version and/or linked apps
-pub async fn edit(display_name: &str, version: Option<&str>, links: &[&str]) -> Result<(), String> {
-    let pb = spinner(&format!("Updating {}...", display_name));
+pub async fn edit(
+    display_name: &str,
+    version: Option<&str>,
+    links: &[&str],
+    connection: Option<&str>,
+) -> Result<(), String> {
     let resource = find_resource(display_name).await?;
+
+    if resource.name == "postgres" && !links.is_empty() && connection.is_none() {
+        return Err(
+            "Missing --connection. Specify the connection profile for linked apps, for example --connection sync or --connection asyncpg"
+                .to_string(),
+        );
+    }
+
+    let pb = spinner(&format!("Updating {}...", display_name));
     let url = resource_url(&resource.id, None)?;
 
     let mut body = serde_json::json!({});
@@ -347,7 +413,20 @@ pub async fn edit(display_name: &str, version: Option<&str>, links: &[&str]) -> 
                 ids.push(uuid);
             }
         }
-        body["application_ids"] = serde_json::json!(ids);
+        if let Some(connection) = connection {
+            body["attachments"] = serde_json::json!(
+                ids.iter()
+                    .map(|application_id| {
+                        serde_json::json!({
+                            "application_id": application_id,
+                            "connection_profile": connection,
+                        })
+                    })
+                    .collect::<Vec<_>>()
+            );
+        } else {
+            body["application_ids"] = serde_json::json!(ids);
+        }
     }
 
     let client = reqwest::Client::new();
@@ -372,11 +451,23 @@ pub async fn edit(display_name: &str, version: Option<&str>, links: &[&str]) -> 
 }
 
 // PATCH /resource/{id} — link to one or more applications
-pub async fn attach(display_name: &str, apps: &[&str]) -> Result<(), String> {
-    let new_uuids = find_apps(apps).await?;
-
-    let pb = spinner(&format!("Attaching {}...", display_name));
+pub async fn attach(
+    display_name: &str,
+    apps: &[&str],
+    connection: Option<&str>,
+) -> Result<(), String> {
+    if apps.is_empty() {
+        return Err("Specify at least one --app to attach".to_string());
+    }
     let resource = find_resource(display_name).await?;
+    if resource.name == "postgres" && connection.is_none() {
+        return Err(
+            "Missing --connection. Specify the connection profile for attached apps, for example --connection sync or --connection asyncpg"
+                .to_string(),
+        );
+    }
+    let new_uuids = find_apps(apps).await?;
+    let pb = spinner(&format!("Attaching {}...", display_name));
     let url = resource_url(&resource.id, None)?;
 
     let mut ids: Vec<String> = resource.application_ids.clone();
@@ -386,7 +477,20 @@ pub async fn attach(display_name: &str, apps: &[&str]) -> Result<(), String> {
         }
     }
 
-    let body = serde_json::json!({ "application_ids": ids });
+    let body = match connection {
+        Some(connection) => serde_json::json!({
+            "attachments": ids
+                .iter()
+                .map(|application_id| {
+                    serde_json::json!({
+                        "application_id": application_id,
+                        "connection_profile": connection,
+                    })
+                })
+                .collect::<Vec<_>>()
+        }),
+        None => serde_json::json!({ "application_ids": ids }),
+    };
 
     let client = reqwest::Client::new();
     let resp = client
@@ -413,8 +517,8 @@ pub async fn attach(display_name: &str, apps: &[&str]) -> Result<(), String> {
 
 // POST /resource/{id}/start
 pub async fn start(display_name: &str) -> Result<(), String> {
-    let pb = spinner(&format!("Starting {}...", display_name));
     let resource = find_resource(display_name).await?;
+    let pb = spinner(&format!("Starting {}...", display_name));
     let url = resource_url(&resource.id, Some("start"))?;
 
     let client = reqwest::Client::new();
@@ -437,8 +541,8 @@ pub async fn start(display_name: &str) -> Result<(), String> {
 
 // POST /resource/{id}/stop
 pub async fn stop(display_name: &str) -> Result<(), String> {
-    let pb = spinner(&format!("Stopping {}...", display_name));
     let resource = find_resource(display_name).await?;
+    let pb = spinner(&format!("Stopping {}...", display_name));
     let url = resource_url(&resource.id, Some("stop"))?;
 
     let client = reqwest::Client::new();
@@ -497,8 +601,8 @@ pub async fn env_set(display_name: &str, pair: &str) -> Result<(), String> {
         .split_once('=')
         .ok_or_else(|| "Invalid format: expected KEY=VALUE".to_string())?;
 
-    let pb = spinner(&format!("Setting env for {}...", display_name));
     let resource = find_resource(display_name).await?;
+    let pb = spinner(&format!("Setting env for {}...", display_name));
 
     let get_url = resource_url(&resource.id, Some("env"))?;
     let get_resp = reqwest::get(get_url)

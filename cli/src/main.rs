@@ -2,15 +2,14 @@ mod commands;
 
 use clap::{CommandFactory, Parser, Subcommand};
 use clap_complete::{Shell, generate};
-use commands::{apps, resources};
+use commands::{apps, projects, resources};
 use std::io;
 
 #[derive(Parser)]
 #[command(
     name = "paastech",
     about = "PaasTech CLI — deploy and manage your apps",
-    version,
-    propagate_version = true
+    version
 )]
 struct Cli {
     #[command(subcommand)]
@@ -19,6 +18,22 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
+    /// Initialize a project in the current directory
+    Init {
+        /// Project name
+        name: String,
+    },
+    /// Deploy the current project directory using its local manifest/buildpack files
+    Deploy {
+        /// Fallback port for projects without process declarations
+        #[arg(long, default_value = "8080", value_parser = clap::value_parser!(u16).range(1..))]
+        port: u16,
+    },
+    /// Manage the active project
+    Project {
+        #[command(subcommand)]
+        command: ProjectCommands,
+    },
     /// Manage applications
     App {
         #[command(subcommand)]
@@ -35,6 +50,30 @@ enum Commands {
         #[arg(value_enum)]
         shell: Shell,
     },
+}
+
+#[derive(Subcommand)]
+enum ProjectCommands {
+    /// Show active project info
+    Info,
+    /// List projects
+    List,
+    /// Manage project environment variables
+    Env {
+        #[command(subcommand)]
+        command: ProjectEnvCommands,
+    },
+}
+
+#[derive(Subcommand)]
+enum ProjectEnvCommands {
+    /// Set an environment variable (format: KEY=VALUE)
+    Set {
+        /// Key=Value pair
+        pair: String,
+    },
+    /// List environment variables
+    List,
 }
 
 #[derive(Subcommand)]
@@ -120,10 +159,13 @@ enum ResourceCommands {
         r#type: String,
         /// Docker Hub version tag
         #[arg(long)]
-        version: String,
+        version: Option<String>,
         /// Application name to link at creation (repeatable)
         #[arg(long)]
         link: Vec<String>,
+        /// Connection profile to use for linked apps (for postgres: sync or asyncpg)
+        #[arg(long)]
+        connection: Option<String>,
     },
     /// List all resources
     List,
@@ -147,6 +189,9 @@ enum ResourceCommands {
         /// Application name to link (repeatable)
         #[arg(long)]
         link: Vec<String>,
+        /// Connection profile to use for linked apps (for postgres: sync or asyncpg)
+        #[arg(long)]
+        connection: Option<String>,
     },
     /// Attach a resource to one or more applications
     Attach {
@@ -155,6 +200,9 @@ enum ResourceCommands {
         /// Application name (repeatable)
         #[arg(long)]
         app: Vec<String>,
+        /// Connection profile to use for attached apps (for postgres: sync or asyncpg)
+        #[arg(long)]
+        connection: Option<String>,
     },
     /// Start a stopped resource
     Start {
@@ -211,6 +259,16 @@ async fn main() {
     let cli = Cli::parse();
 
     let result = match cli.command {
+        Commands::Init { name } => projects::init(&name).await,
+        Commands::Deploy { port } => apps::deploy_current_dir(port).await,
+        Commands::Project { command } => match command {
+            ProjectCommands::Info => projects::info().await,
+            ProjectCommands::List => projects::list().await,
+            ProjectCommands::Env { command } => match command {
+                ProjectEnvCommands::Set { pair } => projects::env_set(&pair).await,
+                ProjectEnvCommands::List => projects::env_list().await,
+            },
+        },
         Commands::Completion { shell } => {
             generate(shell, &mut Cli::command(), "paastech", &mut io::stdout());
             return;
@@ -235,9 +293,17 @@ async fn main() {
                 r#type,
                 version,
                 link,
+                connection,
             } => {
                 let refs: Vec<&str> = link.iter().map(|s| s.as_str()).collect();
-                resources::create(&name, &r#type, &version, &refs).await
+                resources::create(
+                    &name,
+                    &r#type,
+                    version.as_deref(),
+                    &refs,
+                    connection.as_deref(),
+                )
+                .await
             }
             ResourceCommands::List => resources::list().await,
             ResourceCommands::Info { name } => resources::info(&name).await,
@@ -246,13 +312,18 @@ async fn main() {
                 name,
                 version,
                 link,
+                connection,
             } => {
                 let refs: Vec<&str> = link.iter().map(|s| s.as_str()).collect();
-                resources::edit(&name, version.as_deref(), &refs).await
+                resources::edit(&name, version.as_deref(), &refs, connection.as_deref()).await
             }
-            ResourceCommands::Attach { name, app } => {
+            ResourceCommands::Attach {
+                name,
+                app,
+                connection,
+            } => {
                 let refs: Vec<&str> = app.iter().map(|s| s.as_str()).collect();
-                resources::attach(&name, &refs).await
+                resources::attach(&name, &refs, connection.as_deref()).await
             }
             ResourceCommands::Start { name } => resources::start(&name).await,
             ResourceCommands::Stop { name } => resources::stop(&name).await,
