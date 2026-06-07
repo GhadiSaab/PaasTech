@@ -1,8 +1,10 @@
 mod commands;
 
 use clap::{CommandFactory, Parser, Subcommand};
-use clap_complete::{Shell, generate};
+use clap_complete::engine::ArgValueCompleter;
+use clap_complete::{CompleteEnv, Shell, generate};
 use commands::{apps, projects, resources};
+use commands::completions::{AppNameCompleter, ResourceNameCompleter};
 use std::io;
 
 #[derive(Parser)]
@@ -44,7 +46,7 @@ enum Commands {
         #[command(subcommand)]
         command: ResourceCommands,
     },
-    /// Generate shell completion script
+    /// Generate shell completion script (static)
     Completion {
         /// Shell to generate completions for
         #[arg(value_enum)]
@@ -94,21 +96,25 @@ enum AppCommands {
     /// Delete an application
     Delete {
         /// Application name
+        #[arg(add = ArgValueCompleter::new(AppNameCompleter))]
         name: String,
     },
     /// Show info about an application
     Info {
         /// Application name
+        #[arg(add = ArgValueCompleter::new(AppNameCompleter))]
         name: String,
     },
     /// Stop a running application
     Stop {
         /// Application name
+        #[arg(add = ArgValueCompleter::new(AppNameCompleter))]
         name: String,
     },
     /// Restart an application
     Restart {
         /// Application name
+        #[arg(add = ArgValueCompleter::new(AppNameCompleter))]
         name: String,
     },
     /// Upload a zip of source code to the server
@@ -120,6 +126,7 @@ enum AppCommands {
     /// Show logs for an application
     Logs {
         /// Application name
+        #[arg(add = ArgValueCompleter::new(AppNameCompleter))]
         name: String,
         /// Number of lines to show from the end
         #[arg(long)]
@@ -137,6 +144,7 @@ enum EnvCommands {
     /// Set an environment variable (format: KEY=VALUE)
     Set {
         /// Application name
+        #[arg(add = ArgValueCompleter::new(AppNameCompleter))]
         name: String,
         /// Key=Value pair
         pair: String,
@@ -144,6 +152,7 @@ enum EnvCommands {
     /// List environment variables for an application
     List {
         /// Application name
+        #[arg(add = ArgValueCompleter::new(AppNameCompleter))]
         name: String,
     },
 }
@@ -161,7 +170,7 @@ enum ResourceCommands {
         #[arg(long)]
         version: Option<String>,
         /// Application name to link at creation (repeatable)
-        #[arg(long)]
+        #[arg(long, add = ArgValueCompleter::new(AppNameCompleter))]
         link: Vec<String>,
         /// Connection profile to use for linked apps (for postgres: sync or asyncpg)
         #[arg(long)]
@@ -172,22 +181,25 @@ enum ResourceCommands {
     /// Show info about a resource
     Info {
         /// Resource name
+        #[arg(add = ArgValueCompleter::new(ResourceNameCompleter))]
         name: String,
     },
     /// Delete a resource
     Delete {
         /// Resource name
+        #[arg(add = ArgValueCompleter::new(ResourceNameCompleter))]
         name: String,
     },
     /// Update a resource's version or linked application
     Edit {
         /// Resource name
+        #[arg(add = ArgValueCompleter::new(ResourceNameCompleter))]
         name: String,
         /// New Docker Hub version tag
         #[arg(long)]
         version: Option<String>,
         /// Application name to link (repeatable)
-        #[arg(long)]
+        #[arg(long, add = ArgValueCompleter::new(AppNameCompleter))]
         link: Vec<String>,
         /// Connection profile to use for linked apps (for postgres: sync or asyncpg)
         #[arg(long)]
@@ -196,9 +208,10 @@ enum ResourceCommands {
     /// Attach a resource to one or more applications
     Attach {
         /// Resource name
+        #[arg(add = ArgValueCompleter::new(ResourceNameCompleter))]
         name: String,
         /// Application name (repeatable)
-        #[arg(long)]
+        #[arg(long, add = ArgValueCompleter::new(AppNameCompleter))]
         app: Vec<String>,
         /// Connection profile to use for attached apps (for postgres: sync or asyncpg)
         #[arg(long)]
@@ -207,16 +220,19 @@ enum ResourceCommands {
     /// Start a stopped resource
     Start {
         /// Resource name
+        #[arg(add = ArgValueCompleter::new(ResourceNameCompleter))]
         name: String,
     },
     /// Stop a running resource
     Stop {
         /// Resource name
+        #[arg(add = ArgValueCompleter::new(ResourceNameCompleter))]
         name: String,
     },
     /// Show logs for a resource
     Logs {
         /// Resource name
+        #[arg(add = ArgValueCompleter::new(ResourceNameCompleter))]
         name: String,
         /// Number of lines to show from the end
         #[arg(long)]
@@ -239,6 +255,7 @@ enum ResourceEnvCommands {
     /// Set an environment variable (format: KEY=VALUE)
     Set {
         /// Resource name
+        #[arg(add = ArgValueCompleter::new(ResourceNameCompleter))]
         name: String,
         /// Key=Value pair
         pair: String,
@@ -246,6 +263,7 @@ enum ResourceEnvCommands {
     /// List environment variables for a resource
     List {
         /// Resource name
+        #[arg(add = ArgValueCompleter::new(ResourceNameCompleter))]
         name: String,
     },
 }
@@ -254,8 +272,20 @@ pub fn api_base() -> String {
     std::env::var("PAAS_API_URL").unwrap_or_else(|_| "http://127.0.0.1:8080".to_string())
 }
 
-#[tokio::main]
-async fn main() {
+fn main() {
+    // Doit s'exécuter avant le runtime tokio : les completers utilisent reqwest::blocking
+    // qui crée son propre runtime interne (incompatible avec un runtime tokio existant).
+    // Si COMPLETE est défini, génère les complétions et quitte le processus.
+    CompleteEnv::with_factory(Cli::command).complete();
+
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .expect("failed to build tokio runtime")
+        .block_on(async_main());
+}
+
+async fn async_main() {
     let cli = Cli::parse();
 
     let result = match cli.command {

@@ -25,8 +25,8 @@ assets = [
 
 [dependencies]
 clap = { version = "4", features = ["derive", "env"] }
-clap_complete = "4"
-reqwest = { version = "0.11", default-features = false, features = ["json", "multipart", "rustls-tls"] }
+clap_complete = { version = "4", features = ["unstable-dynamic"] }
+reqwest = { version = "0.11", default-features = false, features = ["json", "multipart", "rustls-tls", "blocking"] }
 indicatif = "0.18.4"
 colored = "3.1.1"
 tokio = { version = "1", features = ["full"] }
@@ -35,3 +35,6 @@ serde_json = "1"
 toml = "0.8"
 walkdir = "2"
 zip = { version = "2.4.2", default-features = false, features = ["deflate"] }
+
+[dev-dependencies]
+mockito = "1"
