@@ -3,8 +3,8 @@ mod commands;
 use clap::{CommandFactory, Parser, Subcommand};
 use clap_complete::engine::ArgValueCompleter;
 use clap_complete::{CompleteEnv, Shell, generate};
-use commands::{apps, projects, resources};
 use commands::completions::{AppNameCompleter, ResourceNameCompleter};
+use commands::{apps, projects, resources};
 use std::io;
 
 #[derive(Parser)]
@@ -122,6 +122,18 @@ enum AppCommands {
         /// Path to the zip file
         #[arg(long)]
         source: String,
+    },
+    /// Perform a rolling update on a running application
+    Update {
+        /// Application name
+        #[arg(add = ArgValueCompleter::new(AppNameCompleter))]
+        name: String,
+        /// New Docker image to deploy (e.g. nginx:1.27, node:22)
+        #[arg(long)]
+        image: String,
+        /// Port the container exposes (1-65535)
+        #[arg(long, value_parser = clap::value_parser!(u16).range(1..))]
+        port: Option<u16>,
     },
     /// Show logs for an application
     Logs {
@@ -316,6 +328,9 @@ async fn async_main() {
             AppCommands::Info { name } => apps::info(&name).await,
             AppCommands::Stop { name } => apps::stop(&name).await,
             AppCommands::Restart { name } => apps::restart(&name).await,
+            AppCommands::Update { name, image, port } => {
+                apps::rolling_update(&name, &image, port).await
+            }
             AppCommands::Upload { source } => apps::upload(&source).await,
             AppCommands::Logs { name, tail, follow } => apps::logs(&name, tail, follow).await,
             AppCommands::Env { command } => match command {

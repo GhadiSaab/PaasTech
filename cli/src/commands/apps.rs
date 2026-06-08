@@ -201,6 +201,39 @@ pub async fn stop(name: &str) -> Result<(), String> {
     Ok(())
 }
 
+// POST /app/{name}/update — rolling update
+pub async fn rolling_update(name: &str, image: &str, port: Option<u16>) -> Result<(), String> {
+    let url = app_url(name, "update")?;
+    let pb = spinner(&format!("Rolling update {} → {}...", name, image));
+    let client = reqwest::Client::new();
+    let mut body = serde_json::json!({ "image": image });
+    if let Some(p) = port {
+        body["port"] = serde_json::json!(p);
+    }
+    let resp = client
+        .post(url)
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| format!("Request failed: {e}"))?;
+    pb.finish_and_clear();
+
+    match resp.status().as_u16() {
+        200 => println!("{} App {} updated to {}", "✓".green(), name.bold(), image),
+        404 => return Err(format!("App '{}' not found", name)),
+        422 => {
+            let text = resp.text().await.unwrap_or_default();
+            return Err(format!("Port required: {}", text));
+        }
+        code => {
+            let text = resp.text().await.unwrap_or_default();
+            return Err(format!("Server error ({}): {}", code, text));
+        }
+    }
+
+    Ok(())
+}
+
 // POST /app/{name}/restart — exists
 pub async fn restart(name: &str) -> Result<(), String> {
     let url = app_url(name, "restart")?;
