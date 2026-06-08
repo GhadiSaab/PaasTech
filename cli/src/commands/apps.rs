@@ -338,6 +338,70 @@ pub async fn deploy_current_dir(port: u16) -> Result<(), String> {
     result
 }
 
+pub async fn update_current_dir(port: u16) -> Result<(), String> {
+    let root = project_root()?;
+    validate_source_project(&root)?;
+    let app_name = read_project_name(&root)?;
+    let project = require_project()?;
+    let client = reqwest::Client::new();
+
+    let status_resp = client
+        .get(format!(
+            "{}/project/{}/app/{}/status",
+            api_base(),
+            project,
+            app_name
+        ))
+        .send()
+        .await
+        .map_err(|e| format!("Request failed: {e}"))?;
+    if status_resp.status().as_u16() == 404 {
+        return Err(format!(
+            "App '{}' has not been deployed yet. Run `paastech deploy` first.",
+            app_name
+        ));
+    }
+    if !status_resp.status().is_success() {
+        return Err(format!("Server error: {}", status_resp.status()));
+    }
+
+    let archive = package_project(&root)?;
+    let file_bytes = tokio::fs::read(&archive)
+        .await
+        .map_err(|e| format!("Failed to read archive: {e}"))?;
+    let _ = std::fs::remove_file(&archive);
+
+    let pb = spinner(&format!("Uploading {} for rolling update...", app_name));
+    let part = reqwest::multipart::Part::bytes(file_bytes)
+        .file_name("app.zip")
+        .mime_str("application/zip")
+        .map_err(|e| format!("MIME error: {e}"))?;
+    let form = reqwest::multipart::Form::new()
+        .part("file", part)
+        .text("internal_port", port.to_string());
+
+    let resp = client
+        .post(format!(
+            "{}/project/{}/app/{}/update",
+            api_base(),
+            project,
+            app_name
+        ))
+        .multipart(form)
+        .send()
+        .await
+        .map_err(|e| format!("Request failed: {e}"))?;
+    pb.finish_and_clear();
+
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let text = resp.text().await.unwrap_or_default();
+        return Err(format!("Update failed ({}): {}", status, text));
+    }
+
+    wait_until_running(&client, &project, &app_name).await
+}
+
 async fn upload_archive(
     path: &Path,
     fallback_port: Option<u16>,

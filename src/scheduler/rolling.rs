@@ -12,27 +12,39 @@ use uuid::Uuid;
 use crate::registry::Registry;
 
 use super::{
-    DeployError, Scheduler, app_container_name, build_traefik_labels, find_free_port, project_net,
-    resolve_domain, traefik_network_name,
+    DeployError, Scheduler, app_process_container_name, build_traefik_labels, find_free_port,
+    project_net, resolve_domain, traefik_network_name,
 };
 
 impl Scheduler {
     #[allow(clippy::too_many_arguments)]
-    pub async fn rolling_update(
+    pub async fn rolling_update_process(
         &self,
         pool: &PgPool,
         project_id: Uuid,
         network_name: &str,
-        name: &str,
+        app_name: &str,
+        process_name: &str,
         new_image: &str,
         internal_port: Option<u16>,
         env: Vec<String>,
+        public_host: Option<&str>,
         base_domain: Option<&str>,
     ) -> Result<(), DeployError> {
-        let existing = Registry::get_in_project(pool, project_id, name)
+        let existing = Registry::get_in_project(pool, project_id, app_name)
             .await
-            .map_err(|e| DeployError::Other(format!("Failed to load app {name}: {e}")))?
-            .ok_or_else(|| DeployError::AppNotFound(format!("app not found: {name}")))?;
+            .map_err(|e| DeployError::Other(format!("Failed to load app {app_name}: {e}")))?
+            .ok_or_else(|| DeployError::AppNotFound(format!("app not found: {app_name}")))?;
+        let process = Registry::list_processes(pool, existing.id)
+            .await
+            .map_err(|e| {
+                DeployError::Other(format!("Failed to load processes for {app_name}: {e}"))
+            })?
+            .into_iter()
+            .find(|process| process.name == process_name)
+            .ok_or_else(|| {
+                DeployError::AppNotFound(format!("process not found: {app_name}/{process_name}"))
+            })?;
         let domain = resolve_domain(base_domain.or(existing.base_domain.as_deref()));
         let image = self.pull(new_image).await?;
         let internal_port = self.resolve_internal_port(&image, internal_port).await?;
@@ -42,11 +54,13 @@ impl Scheduler {
             .unwrap_or_default()
             .as_secs()
             .to_string();
-        let app_container = app_container_name(project_id, name);
-        let canary_name = format!("{app_container}-canary-{version}");
+        let process_container = app_process_container_name(project_id, app_name, process_name);
+        let canary_name = format!("{process_container}-canary-{version}");
 
         let canary_port = find_free_port().map_err(|e| {
-            DeployError::Other(format!("Failed to find canary port for {name}: {e}"))
+            DeployError::Other(format!(
+                "Failed to find canary port for {app_name}/{process_name}: {e}"
+            ))
         })?;
         let port_key = format!("{}/tcp", internal_port);
         let mut port_bindings: HashMap<String, Option<Vec<PortBinding>>> = HashMap::new();
@@ -133,13 +147,11 @@ impl Scheduler {
                 )
                 .await;
             return Err(DeployError::Other(
-                "health probe timed out after 15s; old container left running".to_string(),
+                "health probe timed out after 15s; old process container left running".to_string(),
             ));
         }
 
-        // Release the app name without stopping the old container. Its Traefik labels
-        // remain active while the replacement starts under the production name.
-        let old_name = format!("{app_container}-old-{version}");
+        let old_name = format!("{process_container}-old-{version}");
         let final_port = match find_free_port() {
             Ok(port) => port,
             Err(e) => {
@@ -158,13 +170,20 @@ impl Scheduler {
                     )
                     .await;
                 return Err(DeployError::Other(format!(
-                    "Failed to find production port for {name}: {e}"
+                    "Failed to find production port for {app_name}/{process_name}: {e}"
                 )));
             }
         };
         let traefik_net = (domain != "localhost").then(traefik_network_name);
-        let mut labels = build_traefik_labels(name, None, internal_port, &version, &domain, None);
-        let router_name = format!("{name}-{version}");
+        let mut labels = build_traefik_labels(
+            app_name,
+            Some(process_name),
+            internal_port,
+            &version,
+            &domain,
+            public_host,
+        );
+        let router_name = format!("{app_name}-{process_name}-{version}");
         labels.insert(
             format!("traefik.http.routers.{router_name}.priority"),
             version.clone(),
@@ -172,7 +191,7 @@ impl Scheduler {
         if let Err(e) = self
             .docker
             .rename_container(
-                &app_container,
+                &process_container,
                 RenameContainerOptionsBuilder::default()
                     .name(&old_name)
                     .build(),
@@ -194,13 +213,13 @@ impl Scheduler {
                 )
                 .await;
             return Err(DeployError::Other(format!(
-                "Failed to rename {name} to {old_name}: {e}"
+                "Failed to rename {app_name}/{process_name} to {old_name}: {e}"
             )));
         }
 
         let final_id = match self
             .create_and_start(
-                &app_container,
+                &process_container,
                 network_name,
                 &image,
                 internal_port,
@@ -220,7 +239,7 @@ impl Scheduler {
                 let _ = self
                     .docker
                     .remove_container(
-                        &app_container,
+                        &process_container,
                         Some(RemoveContainerOptionsBuilder::default().force(true).build()),
                     )
                     .await;
@@ -229,7 +248,7 @@ impl Scheduler {
                     .rename_container(
                         &old_name,
                         RenameContainerOptionsBuilder::default()
-                            .name(&app_container)
+                            .name(&process_container)
                             .build(),
                     )
                     .await;
@@ -248,7 +267,7 @@ impl Scheduler {
                     )
                     .await;
                 return Err(DeployError::Other(format!(
-                    "Failed to create/start replacement {name}: {e}"
+                    "Failed to create/start replacement {app_name}/{process_name}: {e}"
                 )));
             }
         };
@@ -271,7 +290,7 @@ impl Scheduler {
             let _ = self
                 .docker
                 .remove_container(
-                    &app_container,
+                    &process_container,
                     Some(RemoveContainerOptionsBuilder::default().force(true).build()),
                 )
                 .await;
@@ -280,7 +299,7 @@ impl Scheduler {
                 .rename_container(
                     &old_name,
                     RenameContainerOptionsBuilder::default()
-                        .name(&app_container)
+                        .name(&process_container)
                         .build(),
                 )
                 .await;
@@ -299,29 +318,28 @@ impl Scheduler {
                 )
                 .await;
             return Err(DeployError::Other(
-                "production health probe timed out after 15s; old container left running"
+                "production health probe timed out after 15s; old process container left running"
                     .to_string(),
             ));
         }
 
         let mut registry_error = None;
         for attempt in 1..=3 {
-            match Registry::upsert_in_project(
+            match Registry::update_process_running(
                 pool,
-                project_id,
-                name,
+                process.id,
                 &image,
                 &final_id,
                 Some(internal_port as i32),
-                final_port as i32,
-                "running",
-                Some(&domain),
+                Some(final_port as i32),
             )
             .await
             {
-                Ok(_) => break,
+                Ok(()) => break,
                 Err(e) if attempt < 3 => {
-                    eprintln!("registry: failed to update {name} on attempt {attempt}: {e}");
+                    eprintln!(
+                        "registry: failed to update {app_name}/{process_name} on attempt {attempt}: {e}"
+                    );
                     sleep(Duration::from_millis(250 * attempt)).await;
                 }
                 Err(e) => {
@@ -335,7 +353,7 @@ impl Scheduler {
             let _ = self
                 .docker
                 .remove_container(
-                    &app_container,
+                    &process_container,
                     Some(RemoveContainerOptionsBuilder::default().force(true).build()),
                 )
                 .await;
@@ -344,7 +362,7 @@ impl Scheduler {
                 .rename_container(
                     &old_name,
                     RenameContainerOptionsBuilder::default()
-                        .name(&app_container)
+                        .name(&process_container)
                         .build(),
                 )
                 .await;
@@ -365,16 +383,14 @@ impl Scheduler {
 
             return match rollback {
                 Ok(()) => Err(DeployError::Other(format!(
-                    "Failed to update registry for {name}: {e}; rolled back to previous container"
+                    "Failed to update registry for {app_name}/{process_name}: {e}; rolled back to previous container"
                 ))),
                 Err(rollback_error) => Err(DeployError::Other(format!(
-                    "Failed to update registry for {name}: {e}; rollback failed: {rollback_error}"
+                    "Failed to update registry for {app_name}/{process_name}: {e}; rollback failed: {rollback_error}"
                 ))),
             };
         }
 
-        // Traefik batches Docker provider updates. Keep the old backend alive until
-        // the replacement has had time to enter Traefik's dynamic configuration.
         sleep(Duration::from_secs(3)).await;
 
         let _ = self
@@ -392,7 +408,6 @@ impl Scheduler {
             )
             .await;
 
-        // Tear down the canary — it was only used for health probing.
         let _ = self
             .docker
             .stop_container(
@@ -416,7 +431,7 @@ impl Scheduler {
 mod tests {
     #[test]
     fn production_container_receives_custom_env_vars() {
-        // Regression test: rolling_update moved `env` into the canary creation
+        // Regression test: rolling update moved `env` into the canary creation
         // block, then passed only vec!["PORT=N"] to create_and_start for the
         // production container, silently dropping all custom env vars.
         //

@@ -67,6 +67,49 @@ impl Registry {
         Ok(())
     }
 
+    pub async fn delete_process(pool: &PgPool, process_id: Uuid) -> Result<(), sqlx::Error> {
+        sqlx::query("DELETE FROM application_processes WHERE id = $1")
+            .bind(process_id)
+            .execute(pool)
+            .await?;
+        Ok(())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn update_process_definition(
+        pool: &PgPool,
+        process_id: Uuid,
+        process_type: &str,
+        build_context: &str,
+        public_host: Option<&str>,
+        build_env: Value,
+        internal_port: Option<i32>,
+        status: &str,
+    ) -> Result<(), sqlx::Error> {
+        sqlx::query(
+            r#"
+            UPDATE application_processes
+            SET process_type = $1,
+                build_context = $2,
+                public_host = $3,
+                build_env = $4,
+                internal_port = $5,
+                status = $6
+            WHERE id = $7
+            "#,
+        )
+        .bind(process_type)
+        .bind(build_context)
+        .bind(public_host)
+        .bind(build_env)
+        .bind(internal_port)
+        .bind(status)
+        .bind(process_id)
+        .execute(pool)
+        .await?;
+        Ok(())
+    }
+
     pub async fn list_active_processes(
         pool: &PgPool,
     ) -> Result<Vec<ActiveAppProcess>, sqlx::Error> {

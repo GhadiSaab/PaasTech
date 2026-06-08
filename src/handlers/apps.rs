@@ -4,7 +4,7 @@ use futures_util::StreamExt;
 use serde::Deserialize;
 use serde_json::json;
 use sqlx::{PgPool, Row};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use tokio::fs;
 use uuid::Uuid;
 
@@ -20,13 +20,6 @@ use crate::scheduler::{Scheduler, app_container_name, app_process_container_name
 #[derive(Deserialize, utoipa::ToSchema)]
 pub struct DeployBody {
     pub name: String,
-    pub image: String,
-    pub port: Option<u16>,
-    pub base_domain: Option<String>,
-}
-
-#[derive(Deserialize, utoipa::ToSchema)]
-pub struct UpdateBody {
     pub image: String,
     pub port: Option<u16>,
     pub base_domain: Option<String>,
@@ -473,12 +466,12 @@ pub async fn deploy(
     post,
     path = "/app/{app_name}/update",
     params(("app_name" = String, Path, description = "Application name")),
-    request_body = UpdateBody,
+    request_body(content_type = "multipart/form-data", description = "Zip archive of the application. Form fields: file (zip), internal_port (container port to expose)"),
     responses(
-        (status = 200, description = "Rolling update completed"),
+        (status = 202, description = "Rolling update accepted, build running in background"),
+        (status = 400, description = "Missing file or invalid manifest"),
         (status = 404, description = "Application not found"),
-        (status = 422, description = "Internal application port is required"),
-        (status = 500, description = "Rolling update failed"),
+        (status = 500, description = "Internal server error"),
     ),
     tag = "apps"
 )]
@@ -487,48 +480,303 @@ pub async fn update(
     scope: ProjectScope,
     scheduler: web::Data<Scheduler>,
     req: HttpRequest,
-    body: web::Json<UpdateBody>,
-) -> impl Responder {
+    payload: Multipart,
+) -> Result<impl Responder, actix_web::Error> {
     let app_name = app_name_from_request(&req);
     let app = match Registry::get_in_project(&scope.pool, scope.project.id, &app_name).await {
         Ok(Some(app)) => app,
-        Ok(None) => return HttpResponse::NotFound().finish(),
+        Ok(None) => return Ok(HttpResponse::NotFound().finish()),
         Err(e) => {
             eprintln!("registry: get failed for {app_name}: {e}");
-            return HttpResponse::InternalServerError().finish();
+            return Ok(HttpResponse::InternalServerError().finish());
         }
     };
-    let env_vars = match merged_app_env_vars(&scope.pool, scope.project.id, app.id).await {
-        Ok(env_vars) => env_vars,
+
+    let data = save_multipart_file(payload).await?;
+    let zip_filepath = match data.file_path {
+        Some(path) => path,
+        None => return Ok(HttpResponse::BadRequest().body("provide file in payload")),
+    };
+    let internal_port = data
+        .fields
+        .get("internal_port")
+        .and_then(|p| p.trim().parse::<u16>().ok());
+
+    let extracted_folder = extract_zip(zip_filepath)
+        .await
+        .map_err(error::ErrorInternalServerError)?;
+
+    let processes = match load_process_definitions(&extracted_folder, internal_port) {
+        Ok(processes) => processes,
         Err(e) => {
-            eprintln!("registry: failed to merge env vars for {app_name}: {e}");
-            return HttpResponse::InternalServerError().finish();
+            let _ = fs::remove_dir_all(&extracted_folder).await;
+            return Ok(HttpResponse::BadRequest().json(json!({"error": e})));
         }
     };
-    use crate::scheduler::DeployError;
-    match scheduler
-        .rolling_update(
+    let resources = match load_resource_definitions(&extracted_folder) {
+        Ok(resources) => resources,
+        Err(e) => {
+            let _ = fs::remove_dir_all(&extracted_folder).await;
+            return Ok(HttpResponse::BadRequest().json(json!({"error": e})));
+        }
+    };
+
+    let existing_processes = match Registry::list_processes(&scope.pool, app.id).await {
+        Ok(processes) => processes,
+        Err(e) => {
+            let _ = fs::remove_dir_all(&extracted_folder).await;
+            eprintln!("registry: failed to list processes for {app_name}: {e}");
+            return Ok(HttpResponse::InternalServerError().finish());
+        }
+    };
+    let mut existing_by_name: HashMap<_, _> = existing_processes
+        .into_iter()
+        .map(|process| (process.name.clone(), process))
+        .collect();
+    let desired_names: HashSet<_> = processes
+        .iter()
+        .map(|process| process.name.clone())
+        .collect();
+
+    let mut process_rows = Vec::new();
+    for process in &processes {
+        let existed = existing_by_name.contains_key(&process.name);
+        let row = if let Some(row) = existing_by_name.remove(&process.name) {
+            if let Err(e) = Registry::update_process_definition(
+                &scope.pool,
+                row.id,
+                process.process_type.as_str(),
+                &process.path,
+                process.public_host.as_deref(),
+                json!(process.build_env),
+                process.port.map(|p| p as i32),
+                "building",
+            )
+            .await
+            {
+                let _ = fs::remove_dir_all(&extracted_folder).await;
+                eprintln!(
+                    "registry: failed to update process definition {} for {app_name}: {e}",
+                    process.name
+                );
+                return Ok(HttpResponse::InternalServerError().finish());
+            }
+            row
+        } else {
+            match Registry::create_process(
+                &scope.pool,
+                app.id,
+                &process.name,
+                process.process_type.as_str(),
+                &process.path,
+                process.public_host.as_deref(),
+                json!(process.build_env),
+                process.port.map(|p| p as i32),
+                "building",
+            )
+            .await
+            {
+                Ok(row) => row,
+                Err(e) => {
+                    let _ = fs::remove_dir_all(&extracted_folder).await;
+                    eprintln!(
+                        "registry: failed to create process {} for {app_name}: {e}",
+                        process.name
+                    );
+                    return Ok(HttpResponse::InternalServerError().finish());
+                }
+            }
+        };
+        process_rows.push((process.clone(), row, existed));
+    }
+    let removed_processes: Vec<_> = existing_by_name
+        .into_values()
+        .filter(|process| !desired_names.contains(&process.name))
+        .collect();
+
+    if let Err(e) =
+        Registry::update_status(&scope.pool, scope.project.id, &app_name, "updating").await
+    {
+        let _ = fs::remove_dir_all(&extracted_folder).await;
+        eprintln!("registry: failed to mark {app_name} updating: {e}");
+        return Ok(HttpResponse::InternalServerError().finish());
+    }
+
+    let client = reqwest::Client::new();
+    for resource in &resources {
+        if let Err(e) = ensure_manifest_resource_attached(
             &scope.pool,
+            &client,
+            scheduler.get_ref(),
             scope.project.id,
             &scope.project.network_name,
-            &app_name,
-            &body.image,
-            body.port,
-            env_vars,
-            body.base_domain.as_deref(),
+            app.id,
+            resource,
         )
         .await
-    {
-        Ok(()) => HttpResponse::Ok().finish(),
-        Err(DeployError::AppNotFound(message)) => HttpResponse::NotFound().body(message),
-        Err(DeployError::PortRequired(message)) => {
-            HttpResponse::UnprocessableEntity().body(message)
-        }
-        Err(DeployError::Other(message)) => {
-            eprintln!("update: failed to update {app_name}: {message}");
-            HttpResponse::InternalServerError().body(message)
+        {
+            let _ = fs::remove_dir_all(&extracted_folder).await;
+            let _ =
+                Registry::update_status(&scope.pool, scope.project.id, &app_name, "failed").await;
+            return Err(e);
         }
     }
+
+    let pool_bg = scope.pool.clone();
+    let scheduler_bg = scheduler.clone();
+    let project_id = scope.project.id;
+    let project_network = scope.project.network_name.clone();
+    let app_name_bg = app_name.clone();
+    let base_domain = app.base_domain.clone();
+    tokio::spawn(async move {
+        let mut failed = false;
+
+        for (process, row, existed) in process_rows {
+            let image_name = format!("{}-{}", app_name_bg, process.name);
+            let context = extracted_folder.join(&process.path);
+            let env_vars = match merged_app_env_vars(&pool_bg, project_id, row.application_id).await
+            {
+                Ok(env_vars) => env_vars,
+                Err(e) => {
+                    eprintln!(
+                        "registry: failed to load env vars for {} process {}: {e}",
+                        app_name_bg, process.name
+                    );
+                    let _ = Registry::update_process_status(&pool_bg, row.id, "failed").await;
+                    failed = true;
+                    break;
+                }
+            };
+
+            if let Err(e) = build_image_with_name(
+                &image_name,
+                context.to_string_lossy().to_string(),
+                scheduler_bg.docker_host(),
+                &process.build_env,
+            )
+            .await
+            {
+                eprintln!(
+                    "build: failed for {} process {}: {e}",
+                    app_name_bg, process.name
+                );
+                let _ = Registry::update_process_status(&pool_bg, row.id, "failed").await;
+                failed = true;
+                break;
+            }
+
+            let start_result = match process.process_type {
+                ProcessType::Web if existed => {
+                    match scheduler_bg
+                        .rolling_update_process(
+                            &pool_bg,
+                            project_id,
+                            &project_network,
+                            &app_name_bg,
+                            &process.name,
+                            &image_name,
+                            process.port,
+                            env_vars,
+                            process.public_host.as_deref(),
+                            base_domain.as_deref(),
+                        )
+                        .await
+                    {
+                        Ok(()) => continue,
+                        Err(e) => Err(e),
+                    }
+                }
+                ProcessType::Web => {
+                    scheduler_bg
+                        .start_process(
+                            project_id,
+                            &project_network,
+                            &app_name_bg,
+                            &process.name,
+                            &process.process_type,
+                            &image_name,
+                            process.port,
+                            base_domain.as_deref(),
+                            process.public_host.as_deref(),
+                            env_vars,
+                        )
+                        .await
+                }
+                ProcessType::Worker => {
+                    if existed {
+                        scheduler_bg
+                            .stop(&app_process_container_name(
+                                project_id,
+                                &app_name_bg,
+                                &process.name,
+                            ))
+                            .await;
+                    }
+                    scheduler_bg
+                        .start_process(
+                            project_id,
+                            &project_network,
+                            &app_name_bg,
+                            &process.name,
+                            &process.process_type,
+                            &image_name,
+                            process.port,
+                            base_domain.as_deref(),
+                            process.public_host.as_deref(),
+                            env_vars,
+                        )
+                        .await
+                }
+            };
+
+            match start_result {
+                Ok(started) => {
+                    let _ = Registry::update_process_running(
+                        &pool_bg,
+                        row.id,
+                        &image_name,
+                        &started.container_id,
+                        started.internal_port.map(|p| p as i32),
+                        started.host_port.map(|p| p as i32),
+                    )
+                    .await;
+                }
+                Err(e) => {
+                    eprintln!(
+                        "update: failed for {} process {}: {e}",
+                        app_name_bg, process.name
+                    );
+                    let _ = Registry::update_process_status(&pool_bg, row.id, "failed").await;
+                    failed = true;
+                    break;
+                }
+            }
+        }
+
+        if !failed {
+            for process in removed_processes {
+                scheduler_bg
+                    .stop(&app_process_container_name(
+                        project_id,
+                        &app_name_bg,
+                        &process.name,
+                    ))
+                    .await;
+                if let Err(e) = Registry::delete_process(&pool_bg, process.id).await {
+                    eprintln!(
+                        "registry: failed to delete removed process {} for {}: {e}",
+                        process.name, app_name_bg
+                    );
+                }
+            }
+        }
+
+        let _ = fs::remove_dir_all(&extracted_folder).await;
+        let deploy_status = if failed { "failed" } else { "running" };
+        let _ = Registry::update_status(&pool_bg, project_id, &app_name_bg, deploy_status).await;
+    });
+
+    Ok(HttpResponse::Accepted().json(json!({"name": app_name})))
 }
 
 #[utoipa::path(
