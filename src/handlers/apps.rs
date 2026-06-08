@@ -1,5 +1,6 @@
 use actix_multipart::Multipart;
 use actix_web::{HttpRequest, HttpResponse, Responder, delete, error, get, post, put, web};
+use futures_util::StreamExt;
 use serde::Deserialize;
 use serde_json::json;
 use sqlx::{PgPool, Row};
@@ -35,6 +36,7 @@ pub struct UpdateBody {
 pub struct LogsQuery {
     pub tail: Option<usize>,
     pub process: Option<String>,
+    pub follow: Option<bool>,
 }
 
 #[derive(Deserialize)]
@@ -980,6 +982,18 @@ pub async fn logs(
             return HttpResponse::InternalServerError().finish();
         }
     };
+
+    if query.follow.unwrap_or(false) {
+        let stream = scheduler
+            .get_logs_stream(container_name, query.tail)
+            .map(|r| match r {
+                Ok(s) => Ok(web::Bytes::from(s)),
+                Err(e) => Err(error::ErrorInternalServerError(e)),
+            });
+        return HttpResponse::Ok()
+            .content_type("text/plain; charset=utf-8")
+            .streaming(stream);
+    }
 
     match scheduler.get_logs(&container_name, query.tail).await {
         Ok(logs) => HttpResponse::Ok().content_type("text/plain").body(logs),

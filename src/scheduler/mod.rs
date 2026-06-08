@@ -715,6 +715,35 @@ impl Scheduler {
         Ok(output)
     }
 
+    pub fn get_logs_stream(
+        &self,
+        container_name: String,
+        tail: Option<usize>,
+    ) -> impl futures_util::Stream<Item = Result<String, bollard::errors::Error>> + Send + 'static
+    {
+        let docker = self.docker.clone();
+        let tail_str = tail
+            .map(|n| n.to_string())
+            .unwrap_or_else(|| "all".to_string());
+
+        futures_util::stream::once(async move {
+            docker
+                .logs(
+                    &container_name,
+                    Some(
+                        LogsOptionsBuilder::default()
+                            .stdout(true)
+                            .stderr(true)
+                            .follow(true)
+                            .tail(&tail_str)
+                            .build(),
+                    ),
+                )
+                .map_ok(|log| log.to_string())
+        })
+        .flatten()
+    }
+
     pub async fn stop_service(&self, service_id: &str) -> Result<(), bollard::errors::Error> {
         self.docker
             .stop_container(

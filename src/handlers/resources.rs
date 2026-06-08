@@ -1,4 +1,5 @@
 use actix_web::{HttpResponse, Responder, delete, error, get, patch, post, put, web};
+use futures_util::StreamExt;
 use reqwest::Client;
 use serde::Deserialize;
 use sqlx::{PgPool, Row};
@@ -20,6 +21,7 @@ use crate::scheduler::{Scheduler, app_container_name, app_process_container_name
 #[derive(Deserialize)]
 pub struct LogsQuery {
     pub tail: Option<usize>,
+    pub follow: Option<bool>,
 }
 
 async fn fetch_resource_env_vars(
@@ -992,6 +994,18 @@ pub async fn logs(
         .await
         .map_err(error::ErrorInternalServerError)?
         .ok_or_else(|| error::ErrorNotFound("Resource not found"))?;
+
+    if query.follow.unwrap_or(false) {
+        let stream = scheduler
+            .get_logs_stream(uuid.to_string(), query.tail)
+            .map(|r| match r {
+                Ok(s) => Ok(web::Bytes::from(s)),
+                Err(e) => Err(error::ErrorInternalServerError(e)),
+            });
+        return Ok(HttpResponse::Ok()
+            .content_type("text/plain; charset=utf-8")
+            .streaming(stream));
+    }
 
     let logs = scheduler
         .get_logs(&uuid.to_string(), query.tail)
