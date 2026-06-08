@@ -564,7 +564,7 @@ pub async fn stop(display_name: &str) -> Result<(), String> {
 }
 
 // GET /resource/{id}/logs
-pub async fn logs(display_name: &str, tail: Option<u32>) -> Result<(), String> {
+pub async fn logs(display_name: &str, tail: Option<u32>, follow: bool) -> Result<(), String> {
     let resource = find_resource(display_name).await?;
 
     if resource.status == "stopped" {
@@ -578,15 +578,30 @@ pub async fn logs(display_name: &str, tail: Option<u32>) -> Result<(), String> {
     if let Some(n) = tail {
         url.query_pairs_mut().append_pair("tail", &n.to_string());
     }
+    if follow {
+        url.query_pairs_mut().append_pair("follow", "true");
+    }
 
-    let resp = reqwest::get(url)
+    let mut resp = reqwest::get(url)
         .await
         .map_err(|e| format!("Request failed: {e}"))?;
 
     match resp.status().as_u16() {
         200 => {
-            let text = resp.text().await.unwrap_or_default();
-            print!("{}", text);
+            if follow {
+                use std::io::Write;
+                while let Some(chunk) = resp
+                    .chunk()
+                    .await
+                    .map_err(|e| format!("Stream error: {e}"))?
+                {
+                    print!("{}", String::from_utf8_lossy(&chunk));
+                    std::io::stdout().flush().ok();
+                }
+            } else {
+                let text = resp.text().await.unwrap_or_default();
+                print!("{}", text);
+            }
         }
         404 => return Err(format!("Resource '{}' not found", display_name)),
         code => return Err(format!("Server error: {}", code)),

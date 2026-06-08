@@ -131,6 +131,9 @@ enum AppCommands {
         /// Number of lines to show from the end
         #[arg(long)]
         tail: Option<u32>,
+        /// Stream logs in real time (like docker logs -f)
+        #[arg(long, short = 'f')]
+        follow: bool,
     },
     /// Manage environment variables
     Env {
@@ -237,6 +240,9 @@ enum ResourceCommands {
         /// Number of lines to show from the end
         #[arg(long)]
         tail: Option<u32>,
+        /// Stream logs in real time (like docker logs -f)
+        #[arg(long, short = 'f')]
+        follow: bool,
     },
     /// List available versions for a service type (e.g. postgres, redis, s3)
     Versions {
@@ -311,7 +317,7 @@ async fn async_main() {
             AppCommands::Stop { name } => apps::stop(&name).await,
             AppCommands::Restart { name } => apps::restart(&name).await,
             AppCommands::Upload { source } => apps::upload(&source).await,
-            AppCommands::Logs { name, tail } => apps::logs(&name, tail).await,
+            AppCommands::Logs { name, tail, follow } => apps::logs(&name, tail, follow).await,
             AppCommands::Env { command } => match command {
                 EnvCommands::Set { name, pair } => apps::env_set(&name, &pair).await,
                 EnvCommands::List { name } => apps::env_list(&name).await,
@@ -357,7 +363,9 @@ async fn async_main() {
             }
             ResourceCommands::Start { name } => resources::start(&name).await,
             ResourceCommands::Stop { name } => resources::stop(&name).await,
-            ResourceCommands::Logs { name, tail } => resources::logs(&name, tail).await,
+            ResourceCommands::Logs { name, tail, follow } => {
+                resources::logs(&name, tail, follow).await
+            }
             ResourceCommands::Versions { name } => resources::versions(&name).await,
             ResourceCommands::Env { command } => match command {
                 ResourceEnvCommands::Set { name, pair } => resources::env_set(&name, &pair).await,
