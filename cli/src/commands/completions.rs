@@ -1,13 +1,18 @@
 use clap_complete::engine::{CompletionCandidate, ValueCompleter};
 use serde::Deserialize;
 use std::ffi::OsStr;
+use std::sync::OnceLock;
 use std::time::Duration;
 
-fn make_client() -> reqwest::blocking::Client {
-    reqwest::blocking::Client::builder()
-        .timeout(Duration::from_secs(2))
-        .build()
-        .unwrap_or_else(|_| reqwest::blocking::Client::new())
+static CLIENT: OnceLock<reqwest::blocking::Client> = OnceLock::new();
+
+fn get_client() -> &'static reqwest::blocking::Client {
+    CLIENT.get_or_init(|| {
+        reqwest::blocking::Client::builder()
+            .timeout(Duration::from_secs(2))
+            .build()
+            .unwrap_or_else(|_| reqwest::blocking::Client::new())
+    })
 }
 
 pub(crate) fn fetch_app_names_from(api_base: &str) -> Vec<String> {
@@ -16,8 +21,9 @@ pub(crate) fn fetch_app_names_from(api_base: &str) -> Vec<String> {
         name: String,
     }
 
-    make_client()
-        .get(format!("{}/app", api_base))
+    let base = api_base.trim_end_matches('/');
+    get_client()
+        .get(format!("{}/app", base))
         .send()
         .ok()
         .and_then(|r| r.json::<Vec<App>>().ok())
@@ -31,8 +37,9 @@ pub(crate) fn fetch_resource_names_from(api_base: &str) -> Vec<String> {
         display_name: String,
     }
 
-    make_client()
-        .get(format!("{}/resource", api_base))
+    let base = api_base.trim_end_matches('/');
+    get_client()
+        .get(format!("{}/resource", base))
         .send()
         .ok()
         .and_then(|r| r.json::<Vec<Resource>>().ok())
