@@ -1,4 +1,4 @@
-use super::utils::{colored_status, spinner};
+use super::utils::{colored_status, http_client, spinner};
 use crate::api_base;
 use crate::commands::projects::{current_project, require_project};
 use colored::Colorize;
@@ -109,7 +109,7 @@ fn print_table(apps: &[App]) {
 pub async fn deploy(name: &str, image: &str, port: u16) -> Result<(), String> {
     let pb = spinner(&format!("Deploying {} ({})", name, image));
 
-    let client = reqwest::Client::new();
+    let client = http_client();
     let body = serde_json::json!({
         "name": name,
         "image": image,
@@ -184,7 +184,7 @@ fn app_url(name: &str, action: &str) -> Result<reqwest::Url, String> {
 pub async fn stop(name: &str) -> Result<(), String> {
     let url = app_url(name, "stop")?;
     let pb = spinner(&format!("Stopping {}...", name));
-    let client = reqwest::Client::new();
+    let client = http_client();
     let resp = client
         .post(url)
         .send()
@@ -205,7 +205,7 @@ pub async fn stop(name: &str) -> Result<(), String> {
 pub async fn restart(name: &str) -> Result<(), String> {
     let url = app_url(name, "restart")?;
     let pb = spinner(&format!("Restarting {}...", name));
-    let client = reqwest::Client::new();
+    let client = http_client();
     let resp = client
         .post(url)
         .send()
@@ -237,7 +237,7 @@ pub async fn delete(name: &str) -> Result<(), String> {
     }
     let url = url;
     let pb = spinner(&format!("Deleting {}...", name));
-    let client = reqwest::Client::new();
+    let client = http_client();
     let resp = client
         .delete(url)
         .send()
@@ -343,7 +343,7 @@ pub async fn update_current_dir(port: u16) -> Result<(), String> {
     validate_source_project(&root)?;
     let app_name = read_project_name(&root)?;
     let project = require_project()?;
-    let client = reqwest::Client::new();
+    let client = http_client();
 
     let status_resp = client
         .get(format!(
@@ -366,13 +366,18 @@ pub async fn update_current_dir(port: u16) -> Result<(), String> {
     }
 
     let archive = package_project(&root)?;
-    let file_bytes = tokio::fs::read(&archive)
+    let file = tokio::fs::File::open(&archive)
         .await
-        .map_err(|e| format!("Failed to read archive: {e}"))?;
+        .map_err(|e| format!("Failed to open archive: {e}"))?;
+    let file_size = file
+        .metadata()
+        .await
+        .map_err(|e| format!("Failed to stat archive: {e}"))?
+        .len();
     let _ = std::fs::remove_file(&archive);
 
     let pb = spinner(&format!("Uploading {} for rolling update...", app_name));
-    let part = reqwest::multipart::Part::bytes(file_bytes)
+    let part = reqwest::multipart::Part::stream_with_length(file, file_size)
         .file_name("app.zip")
         .mime_str("application/zip")
         .map_err(|e| format!("MIME error: {e}"))?;
@@ -409,17 +414,22 @@ async fn upload_archive(
 ) -> Result<(), String> {
     let pb = spinner("Packaging and uploading...");
 
-    let file_bytes = tokio::fs::read(path)
-        .await
-        .map_err(|e| format!("Failed to read archive: {e}"))?;
-
     let filename = path
         .file_name()
         .and_then(|n| n.to_str())
         .unwrap_or("app.zip")
         .to_string();
 
-    let part = reqwest::multipart::Part::bytes(file_bytes)
+    let file = tokio::fs::File::open(path)
+        .await
+        .map_err(|e| format!("Failed to open archive: {e}"))?;
+    let file_size = file
+        .metadata()
+        .await
+        .map_err(|e| format!("Failed to stat archive: {e}"))?
+        .len();
+
+    let part = reqwest::multipart::Part::stream_with_length(file, file_size)
         .file_name(filename)
         .mime_str("application/zip")
         .map_err(|e| format!("MIME error: {e}"))?;
@@ -432,7 +442,7 @@ async fn upload_archive(
         form = form.text("name", name.to_string());
     }
 
-    let client = reqwest::Client::new();
+    let client = http_client();
     let project = require_project()?;
     let resp = client
         .post(format!("{}/project/{}/app/upload", api_base(), project))
@@ -625,7 +635,7 @@ pub async fn env_set(name: &str, pair: &str) -> Result<(), String> {
 
     let url = app_url(name, "env")?;
     let pb = spinner(&format!("Setting env for {}...", name));
-    let client = reqwest::Client::new();
+    let client = http_client();
     let body = serde_json::json!({ "key": key, "value": value });
 
     let resp = client

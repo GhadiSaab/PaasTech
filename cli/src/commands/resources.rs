@@ -1,4 +1,4 @@
-use super::utils::{colored_status, spinner};
+use super::utils::{colored_status, http_client, spinner};
 use crate::api_base;
 use crate::commands::projects::{current_project, require_project};
 use colored::Colorize;
@@ -224,7 +224,7 @@ pub async fn create(
 
     let project = require_project()?;
     let pb = spinner(&format!("Creating resource {}...", display_name));
-    let client = reqwest::Client::new();
+    let client = http_client();
     let resp = client
         .post(format!("{}/project/{}/resource", api_base(), project))
         .json(&body)
@@ -365,7 +365,7 @@ pub async fn delete(display_name: &str) -> Result<(), String> {
     let pb = spinner(&format!("Deleting {}...", display_name));
     let url = resource_url(&resource.id, None)?;
 
-    let client = reqwest::Client::new();
+    let client = http_client();
     let resp = client
         .delete(url)
         .send()
@@ -429,7 +429,7 @@ pub async fn edit(
         }
     }
 
-    let client = reqwest::Client::new();
+    let client = http_client();
     let resp = client
         .patch(url)
         .json(&body)
@@ -492,7 +492,7 @@ pub async fn attach(
         None => serde_json::json!({ "application_ids": ids }),
     };
 
-    let client = reqwest::Client::new();
+    let client = http_client();
     let resp = client
         .patch(url)
         .json(&body)
@@ -521,7 +521,7 @@ pub async fn start(display_name: &str) -> Result<(), String> {
     let pb = spinner(&format!("Starting {}...", display_name));
     let url = resource_url(&resource.id, Some("start"))?;
 
-    let client = reqwest::Client::new();
+    let client = http_client();
     let resp = client
         .post(url)
         .send()
@@ -545,7 +545,7 @@ pub async fn stop(display_name: &str) -> Result<(), String> {
     let pb = spinner(&format!("Stopping {}...", display_name));
     let url = resource_url(&resource.id, Some("stop"))?;
 
-    let client = reqwest::Client::new();
+    let client = http_client();
     let resp = client
         .post(url)
         .send()
@@ -641,7 +641,7 @@ pub async fn env_set(display_name: &str, pair: &str) -> Result<(), String> {
     env_map.insert(key.to_string(), value.to_string());
 
     let put_url = resource_url(&resource.id, Some("env"))?;
-    let client = reqwest::Client::new();
+    let client = http_client();
     let resp = client
         .put(put_url)
         .json(&env_map)

@@ -1,3 +1,4 @@
+use super::utils::http_client;
 use crate::api_base;
 use colored::Colorize;
 use serde::{Deserialize, Serialize};
@@ -61,7 +62,7 @@ pub fn require_project() -> Result<String, String> {
 }
 
 pub async fn init(name: &str) -> Result<(), String> {
-    let client = reqwest::Client::new();
+    let client = http_client();
     let resp = client
         .post(format!("{}/project", api_base()))
         .json(&serde_json::json!({ "name": name }))
@@ -181,7 +182,7 @@ pub async fn env_set(pair: &str) -> Result<(), String> {
         Err(e) => return Err(format!("Request failed: {e}")),
     };
     env.insert(key.to_string(), value.to_string());
-    let client = reqwest::Client::new();
+    let client = http_client();
     let resp = client
         .put(url)
         .json(&env)
