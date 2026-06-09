@@ -1,6 +1,7 @@
 use actix_multipart::Multipart;
 use actix_web::{HttpRequest, HttpResponse, Responder, delete, error, get, post, put, web};
 use futures_util::StreamExt;
+use reqwest::Client;
 use serde::Deserialize;
 use serde_json::json;
 use sqlx::{PgPool, Row};
@@ -99,6 +100,7 @@ pub(super) async fn merged_app_env_vars(
 async fn handle_upload(
     pool: web::Data<PgPool>,
     scheduler: web::Data<Scheduler>,
+    client: web::Data<Client>,
     project_id: Uuid,
     project_network: String,
     data: MultipartData,
@@ -108,10 +110,16 @@ async fn handle_upload(
         None => return Ok(HttpResponse::BadRequest().body("provide file in payload")),
     };
 
-    let internal_port = data
-        .fields
-        .get("internal_port")
-        .and_then(|p| p.trim().parse::<u16>().ok());
+    let internal_port = match data.fields.get("internal_port") {
+        Some(v) => match v.trim().parse::<u16>() {
+            Ok(p) => Some(p),
+            Err(_) => {
+                return Ok(HttpResponse::BadRequest()
+                    .json(json!({"error": format!("invalid internal_port: {v:?}")})));
+            }
+        },
+        None => None,
+    };
 
     let name = data
         .fields
@@ -235,7 +243,6 @@ async fn handle_upload(
         process_rows.push(row);
     }
 
-    let client = reqwest::Client::new();
     for resource in &resources {
         if let Err(e) = ensure_manifest_resource_attached(
             &pool,
@@ -255,9 +262,11 @@ async fn handle_upload(
     }
 
     let pool_bg = pool.clone();
+    let pool_panic = pool.clone();
     let scheduler_bg = scheduler.clone();
     let name_bg = name.clone();
-    tokio::spawn(async move {
+    let name_panic = name.clone();
+    let handle = tokio::spawn(async move {
         let mut failed = false;
 
         for (process, row) in processes.into_iter().zip(process_rows) {
@@ -336,6 +345,12 @@ async fn handle_upload(
         let deploy_status = if failed { "failed" } else { "running" };
         let _ = Registry::update_status(&pool_bg, project_id, &name_bg, deploy_status).await;
     });
+    tokio::spawn(async move {
+        if let Err(e) = handle.await {
+            eprintln!("deploy task panicked for {name_panic}: {e}");
+            let _ = Registry::update_status(&pool_panic, project_id, &name_panic, "failed").await;
+        }
+    });
 
     Ok(HttpResponse::Accepted().json(json!({"name": name})))
 }
@@ -355,12 +370,14 @@ async fn handle_upload(
 pub async fn upload(
     scope: ProjectScope,
     scheduler: web::Data<Scheduler>,
+    client: web::Data<Client>,
     payload: Multipart,
 ) -> Result<impl Responder, actix_web::Error> {
     let data = save_multipart_file(payload).await?;
     handle_upload(
         scope.pool,
         scheduler,
+        client,
         scope.project.id,
         scope.project.network_name,
         data,
@@ -479,6 +496,7 @@ pub async fn deploy(
 pub async fn update(
     scope: ProjectScope,
     scheduler: web::Data<Scheduler>,
+    client: web::Data<Client>,
     req: HttpRequest,
     payload: Multipart,
 ) -> Result<impl Responder, actix_web::Error> {
@@ -497,10 +515,16 @@ pub async fn update(
         Some(path) => path,
         None => return Ok(HttpResponse::BadRequest().body("provide file in payload")),
     };
-    let internal_port = data
-        .fields
-        .get("internal_port")
-        .and_then(|p| p.trim().parse::<u16>().ok());
+    let internal_port = match data.fields.get("internal_port") {
+        Some(v) => match v.trim().parse::<u16>() {
+            Ok(p) => Some(p),
+            Err(_) => {
+                return Ok(HttpResponse::BadRequest()
+                    .json(json!({"error": format!("invalid internal_port: {v:?}")})));
+            }
+        },
+        None => None,
+    };
 
     let extracted_folder = extract_zip(zip_filepath)
         .await
@@ -602,7 +626,6 @@ pub async fn update(
         return Ok(HttpResponse::InternalServerError().finish());
     }
 
-    let client = reqwest::Client::new();
     for resource in &resources {
         if let Err(e) = ensure_manifest_resource_attached(
             &scope.pool,
@@ -623,12 +646,14 @@ pub async fn update(
     }
 
     let pool_bg = scope.pool.clone();
+    let pool_panic = scope.pool.clone();
     let scheduler_bg = scheduler.clone();
     let project_id = scope.project.id;
     let project_network = scope.project.network_name.clone();
     let app_name_bg = app_name.clone();
+    let app_name_panic = app_name.clone();
     let base_domain = app.base_domain.clone();
-    tokio::spawn(async move {
+    let handle = tokio::spawn(async move {
         let mut failed = false;
 
         for (process, row, existed) in process_rows {
@@ -774,6 +799,13 @@ pub async fn update(
         let _ = fs::remove_dir_all(&extracted_folder).await;
         let deploy_status = if failed { "failed" } else { "running" };
         let _ = Registry::update_status(&pool_bg, project_id, &app_name_bg, deploy_status).await;
+    });
+    tokio::spawn(async move {
+        if let Err(e) = handle.await {
+            eprintln!("update task panicked for {app_name_panic}: {e}");
+            let _ =
+                Registry::update_status(&pool_panic, project_id, &app_name_panic, "failed").await;
+        }
     });
 
     Ok(HttpResponse::Accepted().json(json!({"name": app_name})))
