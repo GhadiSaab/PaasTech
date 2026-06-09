@@ -1081,10 +1081,14 @@ pub async fn status(
         worst
     };
 
-    let status = if docker_status == "unknown" {
-        app.status.as_deref().unwrap_or("unknown").to_string()
-    } else {
-        docker_status
+    let db_status = app.status.as_deref().unwrap_or("unknown");
+    let status = match db_status {
+        // "failed" and "updating" must win over Docker state: a rolling update
+        // leaves the old container running, so Docker always reports "running"
+        // even when the update failed or is still in progress.
+        "failed" | "updating" => db_status.to_string(),
+        _ if docker_status == "unknown" => db_status.to_string(),
+        _ => docker_status,
     };
     HttpResponse::Ok().body(status)
 }
