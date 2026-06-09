@@ -144,9 +144,9 @@ pub async fn delete(name: &str) -> Result<(), String> {
 
     match resp.status().as_u16() {
         204 => {
-            if let Ok(Some(current)) = current_project() {
-                if current == name {
-                    if let Ok(path) = manifest_path() {
+            if let Ok(Some(path)) = find_manifest() {
+                if let Ok(manifest_name) = read_project_name(&path) {
+                    if manifest_name == name {
                         let _ = std::fs::remove_file(&path);
                     }
                 }
@@ -156,7 +156,7 @@ pub async fn delete(name: &str) -> Result<(), String> {
         }
         400 => {
             let text = resp.text().await.unwrap_or_default();
-            Err(format!("{}", text))
+            Err(text)
         }
         404 => Err(format!("Project '{}' not found", name)),
         code => {
