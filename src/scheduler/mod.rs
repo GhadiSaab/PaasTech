@@ -124,6 +124,22 @@ pub(super) fn build_traefik_labels(
         format!("traefik.http.services.{service_name}.loadbalancer.server.port"),
         internal_port.to_string(),
     );
+
+    if base_domain != "localhost" {
+        labels.insert(
+            format!("traefik.http.routers.{router_name}.entrypoints"),
+            "websecure".to_string(),
+        );
+        labels.insert(
+            format!("traefik.http.routers.{router_name}.tls"),
+            "true".to_string(),
+        );
+        labels.insert(
+            format!("traefik.http.routers.{router_name}.tls.certresolver"),
+            "letsencrypt".to_string(),
+        );
+    }
+
     labels
 }
 
