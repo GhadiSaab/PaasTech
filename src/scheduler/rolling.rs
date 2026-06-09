@@ -13,7 +13,7 @@ use crate::registry::Registry;
 
 use super::{
     DeployError, Scheduler, app_container_name, build_traefik_labels, find_free_port, project_net,
-    resolve_domain,
+    resolve_domain, traefik_network_name,
 };
 
 impl Scheduler {
@@ -162,6 +162,7 @@ impl Scheduler {
                 )));
             }
         };
+        let traefik_net = (domain != "localhost").then(traefik_network_name);
         let mut labels = build_traefik_labels(name, None, internal_port, &version, &domain, None);
         let router_name = format!("{name}-{version}");
         labels.insert(
@@ -210,6 +211,7 @@ impl Scheduler {
                     e.push(format!("PORT={internal_port}"));
                     e
                 },
+                traefik_net.as_deref(),
             )
             .await
         {

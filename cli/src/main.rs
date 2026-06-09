@@ -3,8 +3,8 @@ mod commands;
 use clap::{CommandFactory, Parser, Subcommand};
 use clap_complete::engine::ArgValueCompleter;
 use clap_complete::{CompleteEnv, Shell, generate};
-use commands::{apps, projects, resources};
 use commands::completions::{AppNameCompleter, ResourceNameCompleter};
+use commands::{apps, projects, resources};
 use std::io;
 
 #[derive(Parser)]

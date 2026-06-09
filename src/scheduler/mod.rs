@@ -183,6 +183,10 @@ pub(super) fn resolve_domain(base_domain: Option<&str>) -> String {
         .unwrap_or_else(|| "localhost".to_string())
 }
 
+pub(super) fn traefik_network_name() -> String {
+    std::env::var("TRAEFIK_NETWORK").unwrap_or_else(|_| "paas-net".to_string())
+}
+
 #[derive(Clone)]
 pub struct Scheduler {
     pub(super) docker: Docker,
@@ -433,9 +437,12 @@ impl Scheduler {
         host_port: u16,
         labels: HashMap<String, String>,
         env_vars: Vec<String>,
+        traefik_network: Option<&str>,
     ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
         self.ensure_network(network_name).await;
-        self.ensure_traefik_on_network(network_name).await?;
+        if traefik_network.is_none() {
+            self.ensure_traefik_on_network(network_name).await?;
+        }
         let port_key = format!("{}/tcp", internal_port);
         let mut port_bindings: HashMap<String, Option<Vec<PortBinding>>> = HashMap::new();
         port_bindings.insert(
@@ -465,7 +472,10 @@ impl Scheduler {
                         port_bindings: Some(port_bindings),
                         ..Default::default()
                     }),
-                    labels: Some(labels_for_project_network(labels, network_name)),
+                    labels: Some(labels_for_project_network(
+                        labels,
+                        traefik_network.unwrap_or(network_name),
+                    )),
                     networking_config: Some(bollard::models::NetworkingConfig {
                         endpoints_config: Some(project_net(network_name)),
                     }),
@@ -480,6 +490,14 @@ impl Scheduler {
                 Some(StartContainerOptionsBuilder::default().build()),
             )
             .await?;
+
+        if let Some(traefik_net) = traefik_network
+            && let Err(e) = self
+                .ensure_container_on_network(traefik_net, container_name)
+                .await
+        {
+            eprintln!("warn: failed to connect {container_name} to {traefik_net}: {e}");
+        }
 
         let container_id = self
             .docker
@@ -567,6 +585,7 @@ impl Scheduler {
                     ))
                 })?;
                 let domain = resolve_domain(base_domain);
+                let traefik_net = (domain != "localhost").then(traefik_network_name);
                 let labels = traefik_labels(
                     app_name,
                     Some(process_name),
@@ -585,6 +604,7 @@ impl Scheduler {
                         host_port,
                         labels,
                         env_vars,
+                        traefik_net.as_deref(),
                     )
                     .await
                     .map_err(|e| {
@@ -798,6 +818,7 @@ impl Scheduler {
         })?;
 
         let domain = resolve_domain(base_domain);
+        let traefik_net = (domain != "localhost").then(traefik_network_name);
         let labels = traefik_labels(app_name, None, internal_port, &domain, None);
         let container_name = app_container_name(project_id, app_name);
 
@@ -814,6 +835,7 @@ impl Scheduler {
                     env_vars.push(format!("PORT={internal_port}"));
                     env_vars
                 },
+                traefik_net.as_deref(),
             )
             .await
             .map_err(|e| DeployError::Other(format!("Failed to create/start {app_name}: {e}")))?;
@@ -868,6 +890,7 @@ impl Scheduler {
             .await;
 
         let domain = resolve_domain(base_domain);
+        let traefik_net = (domain != "localhost").then(traefik_network_name);
         let labels = traefik_labels(app_name, None, internal_port, &domain, None);
 
         let container_id = self
@@ -883,6 +906,7 @@ impl Scheduler {
                     env_vars.push(format!("PORT={internal_port}"));
                     env_vars
                 },
+                traefik_net.as_deref(),
             )
             .await
             .map_err(|e| DeployError::Other(format!("Failed to recreate {app_name}: {e}")))?;
