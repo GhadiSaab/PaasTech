@@ -5,7 +5,7 @@ use actix_web::rt::time::sleep;
 use bollard::Docker;
 use bollard::models::{
     ContainerCreateBody, EndpointSettings, HostConfig, NetworkConnectRequest, NetworkCreateRequest,
-    PortBinding,
+    NetworkDisconnectRequest, PortBinding,
 };
 use bollard::query_parameters::{
     CreateContainerOptionsBuilder, CreateImageOptionsBuilder, ListContainersOptionsBuilder,
@@ -359,6 +359,23 @@ impl Scheduler {
                 ..Default::default()
             })
             .await;
+    }
+
+    pub async fn disconnect_from_network(&self, network_name: &str, container_name: &str) {
+        let _ = self
+            .docker
+            .disconnect_network(
+                network_name,
+                NetworkDisconnectRequest {
+                    container: container_name.to_string(),
+                    force: Some(true),
+                },
+            )
+            .await;
+    }
+
+    pub async fn remove_network(&self, network_name: &str) {
+        let _ = self.docker.remove_network(network_name).await;
     }
 
     pub async fn ensure_container_on_network(
