@@ -294,18 +294,9 @@ async fn test_status_app_failed_beats_docker_running() {
     let app_name = "test-status-failed-app";
 
     cleanup_app(pool.get_ref(), app_name).await;
-    Registry::save(
-        pool.get_ref(),
-        app_name,
-        "",
-        "",
-        None,
-        9004,
-        "failed",
-        None,
-    )
-    .await
-    .unwrap();
+    Registry::save(pool.get_ref(), app_name, "", "", None, 9004, "failed", None)
+        .await
+        .unwrap();
 
     let app = test::init_service(
         App::new()
@@ -322,7 +313,10 @@ async fn test_status_app_failed_beats_docker_running() {
     assert_eq!(resp.status(), 200);
     let body = test::read_body(resp).await;
     let status_str = String::from_utf8(body.to_vec()).unwrap();
-    assert_eq!(status_str, "failed", "status endpoint must return DB 'failed' even when no container exists (Docker returns 'unknown')");
+    assert_eq!(
+        status_str, "failed",
+        "status endpoint must return DB 'failed' even when no container exists (Docker returns 'unknown')"
+    );
 
     cleanup_app(pool.get_ref(), app_name).await;
 }
