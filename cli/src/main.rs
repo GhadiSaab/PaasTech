@@ -60,6 +60,11 @@ enum ProjectCommands {
     Info,
     /// List projects
     List,
+    /// Delete a project
+    Delete {
+        /// Project name
+        name: String,
+    },
     /// Manage project environment variables
     Env {
         #[command(subcommand)]
@@ -300,6 +305,7 @@ async fn async_main() {
         Commands::Project { command } => match command {
             ProjectCommands::Info => projects::info().await,
             ProjectCommands::List => projects::list().await,
+            ProjectCommands::Delete { name } => projects::delete(&name).await,
             ProjectCommands::Env { command } => match command {
                 ProjectEnvCommands::Set { pair } => projects::env_set(&pair).await,
                 ProjectEnvCommands::List => projects::env_list().await,

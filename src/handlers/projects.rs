@@ -1,9 +1,11 @@
 use actix_web::{Error, HttpResponse, Responder, delete, error, get, post, put, web};
-use sqlx::PgPool;
+use sqlx::{PgPool, Row};
 use std::collections::HashMap;
+use uuid::Uuid;
 
 use crate::models::CreateProjectPayload;
 use crate::registry::{DEFAULT_PROJECT_NAME, Registry};
+use crate::scheduler::{Scheduler, app_container_name, app_process_container_name};
 
 #[utoipa::path(
     post,
@@ -92,12 +94,60 @@ pub async fn get(
 #[delete("/project/{project}")]
 pub async fn delete(
     pool: web::Data<PgPool>,
+    scheduler: web::Data<Scheduler>,
     path: web::Path<String>,
 ) -> Result<impl Responder, Error> {
     let name = path.into_inner();
     if name == DEFAULT_PROJECT_NAME {
         return Err(error::ErrorBadRequest("Default project cannot be deleted"));
     }
+
+    let project = Registry::get_project(&pool, &name)
+        .await
+        .map_err(error::ErrorInternalServerError)?
+        .ok_or_else(|| error::ErrorNotFound("Project not found"))?;
+
+    let apps = Registry::list_in_project(&pool, project.id)
+        .await
+        .map_err(error::ErrorInternalServerError)?;
+    for app in apps {
+        let processes = Registry::list_processes(&pool, app.id)
+            .await
+            .map_err(error::ErrorInternalServerError)?;
+        if !processes.is_empty() {
+            for process in processes {
+                scheduler
+                    .stop(&app_process_container_name(
+                        project.id,
+                        &app.name,
+                        &process.name,
+                    ))
+                    .await;
+            }
+        } else {
+            scheduler
+                .stop(&app_container_name(project.id, &app.name))
+                .await;
+        }
+    }
+
+    let services = sqlx::query("SELECT id FROM services WHERE project_id = $1")
+        .bind(project.id)
+        .fetch_all(pool.get_ref())
+        .await
+        .map_err(error::ErrorInternalServerError)?;
+    for service in services {
+        let service_id: Uuid = service.get("id");
+        let _ = scheduler.stop_service(&service_id.to_string()).await;
+    }
+
+    let traefik_container =
+        std::env::var("TRAEFIK_CONTAINER").unwrap_or_else(|_| "paastech-traefik-1".to_string());
+    scheduler
+        .disconnect_from_network(&project.network_name, &traefik_container)
+        .await;
+    scheduler.remove_network(&project.network_name).await;
+
     let affected = Registry::delete_project(&pool, &name)
         .await
         .map_err(error::ErrorInternalServerError)?;
