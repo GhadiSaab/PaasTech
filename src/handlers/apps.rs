@@ -470,7 +470,6 @@ pub async fn deploy(
         .await
     {
         Ok(()) => HttpResponse::Ok().finish(),
-        Err(DeployError::AppNotFound(message)) => HttpResponse::NotFound().body(message),
         Err(DeployError::PortRequired(message)) => {
             HttpResponse::UnprocessableEntity().body(message)
         }
