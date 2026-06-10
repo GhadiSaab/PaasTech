@@ -5,6 +5,7 @@ mod handlers;
 mod models;
 mod registry;
 mod scheduler;
+pub mod status;
 
 use actix_web::{App, HttpServer, web};
 use reqwest::Client;

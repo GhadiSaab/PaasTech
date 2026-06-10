@@ -285,6 +285,86 @@ async fn test_status_app() {
 }
 
 #[actix_web::test]
+async fn test_status_app_failed_beats_docker_running() {
+    // Regression: status endpoint returned Docker state ("running") even when
+    // DB status was "failed". During a rolling update, the old container stays
+    // running, so Docker always reports "running" — the DB status must win.
+    let scheduler = build_scheduler();
+    let pool = build_pool().await;
+    let app_name = "test-status-failed-app";
+
+    cleanup_app(pool.get_ref(), app_name).await;
+    Registry::save(pool.get_ref(), app_name, "", "", None, 9004, "failed", None)
+        .await
+        .unwrap();
+
+    let app = test::init_service(
+        App::new()
+            .app_data(scheduler.clone())
+            .app_data(pool.clone())
+            .service(web::scope("/app").service(handlers::apps::status)),
+    )
+    .await;
+
+    let req = test::TestRequest::get()
+        .uri(&format!("/app/{}/status", app_name))
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status(), 200);
+    let body = test::read_body(resp).await;
+    let status_str = String::from_utf8(body.to_vec()).unwrap();
+    assert_eq!(
+        status_str, "failed",
+        "status endpoint must return DB 'failed' even when no container exists (Docker returns 'unknown')"
+    );
+
+    cleanup_app(pool.get_ref(), app_name).await;
+}
+
+#[actix_web::test]
+async fn test_status_app_updating_beats_docker_running() {
+    // Rolling updates keep the old container running (Docker = "running"), but
+    // the DB is "updating". The status endpoint must return "updating" so that
+    // wait_until_running keeps polling instead of declaring false success.
+    let scheduler = build_scheduler();
+    let pool = build_pool().await;
+    let app_name = "test-status-updating-app";
+
+    cleanup_app(pool.get_ref(), app_name).await;
+    Registry::save(
+        pool.get_ref(),
+        app_name,
+        "",
+        "",
+        None,
+        9005,
+        "updating",
+        None,
+    )
+    .await
+    .unwrap();
+
+    let app = test::init_service(
+        App::new()
+            .app_data(scheduler.clone())
+            .app_data(pool.clone())
+            .service(web::scope("/app").service(handlers::apps::status)),
+    )
+    .await;
+
+    let req = test::TestRequest::get()
+        .uri(&format!("/app/{}/status", app_name))
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status(), 200);
+    let body = test::read_body(resp).await;
+    let status_str = String::from_utf8(body.to_vec()).unwrap();
+    assert_eq!(status_str, "updating");
+
+    cleanup_app(pool.get_ref(), app_name).await;
+}
+
+#[actix_web::test]
 async fn test_status_app_not_found() {
     let scheduler = build_scheduler();
     let pool = build_pool().await;
