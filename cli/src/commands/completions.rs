@@ -22,8 +22,12 @@ pub(crate) fn fetch_app_names_from(api_base: &str) -> Vec<String> {
     }
 
     let base = api_base.trim_end_matches('/');
+    let url = match crate::commands::projects::current_project() {
+        Ok(Some(project)) => format!("{}/project/{}/app", base, project),
+        _ => format!("{}/app", base),
+    };
     get_client()
-        .get(format!("{}/app", base))
+        .get(url)
         .send()
         .ok()
         .and_then(|r| r.json::<Vec<App>>().ok())
@@ -38,8 +42,12 @@ pub(crate) fn fetch_resource_names_from(api_base: &str) -> Vec<String> {
     }
 
     let base = api_base.trim_end_matches('/');
+    let url = match crate::commands::projects::current_project() {
+        Ok(Some(project)) => format!("{}/project/{}/resource", base, project),
+        _ => format!("{}/resource", base),
+    };
     get_client()
-        .get(format!("{}/resource", base))
+        .get(url)
         .send()
         .ok()
         .and_then(|r| r.json::<Vec<Resource>>().ok())

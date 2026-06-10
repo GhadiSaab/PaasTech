@@ -1017,6 +1017,7 @@ pub async fn update(
     }
 
     let mut attached_app_uuids = Vec::new();
+    let mut is_s3 = false;
 
     if payload.application_ids.is_some() || payload.attachments.is_some() {
         let service_info = sqlx::query("SELECT name, container_id FROM services WHERE id = $1")
@@ -1030,6 +1031,7 @@ pub async fn update(
         let container_id: Option<String> = service_info
             .try_get("container_id")
             .map_err(error::ErrorInternalServerError)?;
+        is_s3 = service_name == "s3";
 
         let attachments = if let Some(attachments) = &payload.attachments {
             resource_attachments_from_payload(&service_name, None, None, Some(attachments))?
@@ -1102,14 +1104,66 @@ pub async fn update(
                 .await
                 .map_err(error::ErrorInternalServerError)?;
             }
+        } else if is_s3 {
+            let service_env: HashMap<String, String> = sqlx::query!(
+                "SELECT key, value FROM service_env_vars WHERE service_id = $1 ORDER BY key",
+                uuid
+            )
+            .fetch_all(&mut *tx)
+            .await
+            .map_err(error::ErrorInternalServerError)?
+            .into_iter()
+            .map(|r| (r.key, r.value))
+            .collect();
+
+            for (app_uuid, connection_profile) in &app_uuids {
+                inject_service_env_into_app(
+                    &mut tx,
+                    *app_uuid,
+                    "s3",
+                    garage::CONTAINER_NAME,
+                    garage::S3_PORT,
+                    &service_env,
+                    Some(connection_profile.as_str()),
+                )
+                .await
+                .map_err(error::ErrorInternalServerError)?;
+            }
         }
     }
 
     tx.commit().await.map_err(error::ErrorInternalServerError)?;
 
     if !attached_app_uuids.is_empty() {
-        ensure_attached_service_network(pool.get_ref(), &scheduler, uuid, &attached_app_uuids)
-            .await?;
+        if is_s3 {
+            for app_uuid in &attached_app_uuids {
+                let Some(app) = sqlx::query_as::<_, crate::registry::App>(
+                    "SELECT id, project_id, name, image_id, container_id, internal_port, port, status, base_domain, created_at FROM applications WHERE id = $1",
+                )
+                .bind(app_uuid)
+                .fetch_optional(pool.get_ref())
+                .await
+                .map_err(error::ErrorInternalServerError)?
+                else {
+                    continue;
+                };
+                let project = Registry::get_project_by_id(pool.get_ref(), app.project_id)
+                    .await
+                    .map_err(error::ErrorInternalServerError)?
+                    .ok_or_else(|| error::ErrorInternalServerError("Project not found"))?;
+                scheduler
+                    .ensure_container_on_network(&project.network_name, garage::CONTAINER_NAME)
+                    .await
+                    .map_err(|e| {
+                        error::ErrorInternalServerError(format!(
+                            "Failed to connect Garage to project network: {e}"
+                        ))
+                    })?;
+            }
+        } else {
+            ensure_attached_service_network(pool.get_ref(), &scheduler, uuid, &attached_app_uuids)
+                .await?;
+        }
     }
 
     Ok(HttpResponse::Ok().body("Resource successfully updated"))

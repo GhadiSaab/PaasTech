@@ -1,7 +1,6 @@
 use reqwest::Client;
 use serde::Deserialize;
 use sqlx::{PgPool, Row};
-use std::collections::HashMap;
 use uuid::Uuid;
 
 use crate::scheduler::Scheduler;
@@ -86,8 +85,13 @@ async fn wait_until_ready(
 }
 
 #[derive(Deserialize)]
-struct NodeInfo {
-    node: String,
+struct ClusterStatusResponse {
+    nodes: Vec<ClusterNode>,
+}
+
+#[derive(Deserialize)]
+struct ClusterNode {
+    id: String,
 }
 
 async fn initialize_layout(
@@ -97,27 +101,31 @@ async fn initialize_layout(
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let base = format!("http://{}:{}", admin_host(), admin_port);
 
-    let node: NodeInfo = http
-        .get(format!("{}/v1/node", base))
+    let status: ClusterStatusResponse = http
+        .get(format!("{}/v2/GetClusterStatus", base))
         .bearer_auth(admin_token)
         .send()
         .await?
         .json()
         .await?;
 
-    let mut layout: HashMap<String, serde_json::Value> = HashMap::new();
-    layout.insert(
-        node.node,
-        serde_json::json!({ "zone": "dc1", "capacity": 1_000_000_000u64 }),
-    );
-    http.post(format!("{}/v1/layout", base))
+    let node_id = status
+        .nodes
+        .first()
+        .ok_or("No nodes in cluster status")?
+        .id
+        .clone();
+
+    http.post(format!("{}/v2/UpdateClusterLayout", base))
         .bearer_auth(admin_token)
-        .json(&layout)
+        .json(&serde_json::json!({
+            "roles": [{ "id": node_id, "zone": "dc1", "capacity": 1_000_000_000u64, "tags": [] }]
+        }))
         .send()
         .await?
         .error_for_status()?;
 
-    http.post(format!("{}/v1/layout/apply", base))
+    http.post(format!("{}/v2/ApplyClusterLayout", base))
         .bearer_auth(admin_token)
         .json(&serde_json::json!({ "version": 1 }))
         .send()
@@ -149,7 +157,7 @@ pub async fn create_bucket_and_key(
     let base = format!("http://{}:{}", admin_host(), instance.admin_port);
 
     let bucket: CreateBucketResponse = http
-        .post(format!("{}/v1/bucket", base))
+        .post(format!("{}/v2/CreateBucket", base))
         .bearer_auth(&instance.admin_token)
         .json(&serde_json::json!({ "globalAlias": bucket_name }))
         .send()
@@ -159,7 +167,7 @@ pub async fn create_bucket_and_key(
         .await?;
 
     let key: CreateKeyResponse = http
-        .post(format!("{}/v1/key", base))
+        .post(format!("{}/v2/CreateKey", base))
         .bearer_auth(&instance.admin_token)
         .json(&serde_json::json!({ "name": key_name }))
         .send()
@@ -168,7 +176,7 @@ pub async fn create_bucket_and_key(
         .json()
         .await?;
 
-    http.post(format!("{}/v1/bucket/allow-key", base))
+    http.post(format!("{}/v2/AllowBucketKey", base))
         .bearer_auth(&instance.admin_token)
         .json(&serde_json::json!({
             "bucketId": bucket.id,
@@ -195,13 +203,13 @@ pub async fn delete_bucket_and_key(
     let base = format!("http://{}:{}", admin_host(), instance.admin_port);
 
     let _ = http
-        .delete(format!("{}/v1/key?id={}", base, access_key_id))
+        .post(format!("{}/v2/DeleteKey?id={}", base, access_key_id))
         .bearer_auth(&instance.admin_token)
         .send()
         .await;
 
     let _ = http
-        .delete(format!("{}/v1/bucket?id={}", base, bucket_id))
+        .post(format!("{}/v2/DeleteBucket?id={}", base, bucket_id))
         .bearer_auth(&instance.admin_token)
         .send()
         .await;
