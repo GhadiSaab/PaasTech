@@ -805,6 +805,103 @@ impl Scheduler {
         .flatten()
     }
 
+    pub async fn start_garage_container(
+        &self,
+        admin_token: &str,
+    ) -> Result<(String, u16), Box<dyn std::error::Error + Send + Sync>> {
+        use crate::garage::{
+            CONTAINER_NAME, admin_container_port, garage_container_config, garage_image,
+            init_network,
+        };
+
+        // Remove stale container if present
+        let _ = self
+            .docker
+            .stop_container(
+                CONTAINER_NAME,
+                Some(StopContainerOptionsBuilder::default().build()),
+            )
+            .await;
+        let _ = self
+            .docker
+            .remove_container(
+                CONTAINER_NAME,
+                Some(RemoveContainerOptionsBuilder::default().build()),
+            )
+            .await;
+
+        let config_dir = "/tmp/paastech/s3";
+        std::fs::create_dir_all(config_dir)?;
+        let config_path = format!("{}/garage.toml", config_dir);
+        std::fs::write(&config_path, garage_container_config(admin_token))?;
+
+        self.docker
+            .create_image(
+                Some(
+                    CreateImageOptionsBuilder::default()
+                        .from_image(&garage_image())
+                        .build(),
+                ),
+                None,
+                None,
+            )
+            .try_collect::<Vec<_>>()
+            .await?;
+
+        let admin_host_port = find_free_port()?;
+        let port_key = format!("{}/tcp", admin_container_port());
+        let mut port_bindings: HashMap<String, Option<Vec<PortBinding>>> = HashMap::new();
+        port_bindings.insert(
+            port_key.clone(),
+            Some(vec![PortBinding {
+                host_ip: Some("0.0.0.0".to_string()),
+                host_port: Some(admin_host_port.to_string()),
+            }]),
+        );
+
+        self.ensure_network(init_network()).await;
+
+        self.docker
+            .create_container(
+                Some(
+                    CreateContainerOptionsBuilder::default()
+                        .name(CONTAINER_NAME)
+                        .build(),
+                ),
+                ContainerCreateBody {
+                    image: Some(garage_image().to_string()),
+                    exposed_ports: Some(vec![port_key]),
+                    host_config: Some(HostConfig {
+                        port_bindings: Some(port_bindings),
+                        binds: Some(vec![format!("{}:/etc/garage.toml:ro", config_path)]),
+                        ..Default::default()
+                    }),
+                    networking_config: Some(bollard::models::NetworkingConfig {
+                        endpoints_config: Some(project_net(init_network())),
+                    }),
+                    ..Default::default()
+                },
+            )
+            .await?;
+
+        self.docker
+            .start_container(
+                CONTAINER_NAME,
+                Some(StartContainerOptionsBuilder::default().build()),
+            )
+            .await?;
+
+        let container_id = self
+            .docker
+            .inspect_container(CONTAINER_NAME, None)
+            .await
+            .ok()
+            .and_then(|info| info.id)
+            .unwrap_or_default();
+
+        Ok((container_id, admin_host_port))
+    }
+
     pub async fn stop_service(&self, service_id: &str) -> Result<(), bollard::errors::Error> {
         self.docker
             .stop_container(

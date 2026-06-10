@@ -36,12 +36,21 @@ async fn cleanup_app(pool: &PgPool, name: &str) {
         .ok();
 }
 
+async fn cleanup_resource_by_display_name(pool: &PgPool, display_name: &str) {
+    sqlx::query("DELETE FROM services WHERE display_name = $1")
+        .bind(display_name)
+        .execute(pool)
+        .await
+        .ok();
+}
+
 async fn insert_test_resource(
     pool: &PgPool,
     display_name: &str,
     service_name: &str,
     version: &str,
 ) -> Uuid {
+    cleanup_resource_by_display_name(pool, display_name).await;
     let id = Uuid::new_v4();
     sqlx::query(
         "INSERT INTO services (id, display_name, name, version, status) VALUES ($1, $2, $3, $4, 'stopped')",
@@ -446,6 +455,7 @@ async fn test_delete_resource() {
     let app = test::init_service(
         App::new()
             .app_data(pool)
+            .app_data(build_client())
             .app_data(build_scheduler())
             .service(handlers::resources::delete),
     )
@@ -463,6 +473,8 @@ async fn test_delete_running_resource_removes_container() {
     let pool = build_pool().await;
     let scheduler = build_scheduler();
     let id = Uuid::new_v4();
+
+    cleanup_resource_by_display_name(pool.get_ref(), "Running Redis").await;
 
     let (container_id, host_port) = scheduler
         .start_service(
@@ -490,6 +502,7 @@ async fn test_delete_running_resource_removes_container() {
     let app = test::init_service(
         App::new()
             .app_data(pool.clone())
+            .app_data(build_client())
             .app_data(scheduler.clone())
             .service(handlers::resources::delete),
     )
@@ -512,6 +525,7 @@ async fn test_delete_resource_not_found() {
     let app = test::init_service(
         App::new()
             .app_data(pool)
+            .app_data(build_client())
             .app_data(build_scheduler())
             .service(handlers::resources::delete),
     )
@@ -608,6 +622,7 @@ async fn test_start_resource_already_running() {
     let scheduler = build_scheduler();
     let id = Uuid::new_v4();
 
+    cleanup_resource_by_display_name(pool.get_ref(), "Running Redis").await;
     sqlx::query(
         "INSERT INTO services (id, display_name, name, version, status) VALUES ($1, 'Running Redis', 'redis', '7', 'running')",
     )

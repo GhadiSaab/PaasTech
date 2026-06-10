@@ -14,6 +14,7 @@ use crate::docker::{
 };
 use crate::engine::ResourceDefinition;
 use crate::extractor::ProjectScope;
+use crate::garage;
 use crate::models::{CreateResourcePayload, Resource, ResourceAttachment, UpdateResourcePayload};
 use crate::registry::Registry;
 use crate::scheduler::{Scheduler, app_container_name, app_process_container_name};
@@ -242,6 +243,19 @@ pub async fn ensure_manifest_resource_attached(
     validate_connection_profile_for_service(&resource.service_type, resource.connection.as_deref())
         .map_err(error::ErrorBadRequest)?;
 
+    if resource.service_type == "s3" {
+        return ensure_manifest_s3_attached(
+            pool,
+            client,
+            scheduler,
+            project_id,
+            project_network,
+            application_id,
+            resource,
+        )
+        .await;
+    }
+
     let version = resource
         .version
         .clone()
@@ -409,6 +423,160 @@ pub async fn ensure_manifest_resource_attached(
     Ok(())
 }
 
+async fn ensure_manifest_s3_attached(
+    pool: &PgPool,
+    client: &Client,
+    scheduler: &Scheduler,
+    project_id: Uuid,
+    project_network: &str,
+    application_id: Uuid,
+    resource: &ResourceDefinition,
+) -> Result<(), actix_web::Error> {
+    let existing =
+        sqlx::query("SELECT id, name FROM services WHERE project_id = $1 AND display_name = $2")
+            .bind(project_id)
+            .bind(&resource.name)
+            .fetch_optional(pool)
+            .await
+            .map_err(error::ErrorInternalServerError)?;
+
+    let service_id;
+    let service_env_map: HashMap<String, String>;
+
+    if let Some(existing) = existing {
+        let existing_name: String = existing
+            .try_get("name")
+            .map_err(error::ErrorInternalServerError)?;
+        if existing_name != "s3" {
+            return Err(error::ErrorConflict(format!(
+                "Resource '{}' already exists with type '{}', not 's3'",
+                resource.name, existing_name
+            )));
+        }
+        service_id = existing
+            .try_get("id")
+            .map_err(error::ErrorInternalServerError)?;
+        service_env_map =
+            sqlx::query("SELECT key, value FROM service_env_vars WHERE service_id = $1")
+                .bind(service_id)
+                .fetch_all(pool)
+                .await
+                .map_err(error::ErrorInternalServerError)?
+                .into_iter()
+                .map(|row| {
+                    Ok((
+                        row.try_get("key")
+                            .map_err(error::ErrorInternalServerError)?,
+                        row.try_get("value")
+                            .map_err(error::ErrorInternalServerError)?,
+                    ))
+                })
+                .collect::<Result<HashMap<String, String>, actix_web::Error>>()?;
+    } else {
+        let instance = garage::ensure_running(pool, scheduler, client)
+            .await
+            .map_err(|e| error::ErrorInternalServerError(format!("Failed to start Garage: {e}")))?;
+
+        service_id = Uuid::new_v4();
+        let bucket_name = service_id.simple().to_string();
+        let creds =
+            garage::create_bucket_and_key(client, &instance, &bucket_name, &service_id.to_string())
+                .await
+                .map_err(|e| {
+                    error::ErrorInternalServerError(format!("Failed to create S3 bucket: {e}"))
+                })?;
+
+        let mut tx = pool
+            .begin()
+            .await
+            .map_err(error::ErrorInternalServerError)?;
+        sqlx::query(
+            "INSERT INTO services (id, project_id, display_name, name, version) VALUES ($1, $2, $3, 's3', 'latest')",
+        )
+        .bind(service_id)
+        .bind(project_id)
+        .bind(&resource.name)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| map_resource_insert_error(e, &resource.name))?;
+
+        sqlx::query("UPDATE services SET status = 'running' WHERE id = $1")
+            .bind(service_id)
+            .execute(&mut *tx)
+            .await
+            .map_err(error::ErrorInternalServerError)?;
+
+        sqlx::query(
+            "INSERT INTO s3_buckets (service_id, bucket_id, access_key_id, secret_access_key) VALUES ($1, $2, $3, $4)",
+        )
+        .bind(service_id)
+        .bind(&creds.bucket_id)
+        .bind(&creds.access_key_id)
+        .bind(&creds.secret_access_key)
+        .execute(&mut *tx)
+        .await
+        .map_err(error::ErrorInternalServerError)?;
+
+        service_env_map = [
+            ("S3_ACCESS_KEY_ID".to_string(), creds.access_key_id),
+            ("S3_SECRET_ACCESS_KEY".to_string(), creds.secret_access_key),
+            ("S3_BUCKET".to_string(), bucket_name),
+        ]
+        .into();
+
+        for (key, value) in &service_env_map {
+            sqlx::query!(
+                "INSERT INTO service_env_vars (service_id, key, value) VALUES ($1, $2, $3)",
+                service_id,
+                key,
+                value,
+            )
+            .execute(&mut *tx)
+            .await
+            .map_err(error::ErrorInternalServerError)?;
+        }
+        tx.commit().await.map_err(error::ErrorInternalServerError)?;
+    }
+
+    let mut tx = pool
+        .begin()
+        .await
+        .map_err(error::ErrorInternalServerError)?;
+    sqlx::query(
+        "INSERT INTO application_services (application_id, service_id, connection_profile) VALUES ($1, $2, $3) ON CONFLICT (application_id, service_id) DO UPDATE SET connection_profile = EXCLUDED.connection_profile",
+    )
+    .bind(application_id)
+    .bind(service_id)
+    .bind(resource.connection.as_deref().unwrap_or_default())
+    .execute(&mut *tx)
+    .await
+    .map_err(error::ErrorInternalServerError)?;
+
+    inject_service_env_into_app(
+        &mut tx,
+        application_id,
+        "s3",
+        garage::CONTAINER_NAME,
+        garage::S3_PORT,
+        &service_env_map,
+        resource.connection.as_deref(),
+    )
+    .await
+    .map_err(error::ErrorInternalServerError)?;
+    tx.commit().await.map_err(error::ErrorInternalServerError)?;
+
+    scheduler
+        .ensure_container_on_network(project_network, garage::CONTAINER_NAME)
+        .await
+        .map_err(|e| {
+            error::ErrorInternalServerError(format!(
+                "Failed to connect Garage to project network: {e}"
+            ))
+        })?;
+
+    Ok(())
+}
+
 const RESOURCE_LIST_QUERY: &str = r#"SELECT
     s.id::text as id,
     s.project_id::text as project_id,
@@ -439,13 +607,24 @@ pub async fn create(
     client: web::Data<Client>,
     scheduler: web::Data<Scheduler>,
     payload: web::Json<CreateResourcePayload>,
-) -> Result<impl Responder, actix_web::Error> {
+) -> Result<HttpResponse, actix_web::Error> {
     if !is_valid_service(&payload.name) {
         return Err(error::ErrorBadRequest(format!(
             "Invalid service name '{}'. Must be one of: {}",
             payload.name,
             valid_services().join(", ")
         )));
+    }
+
+    let attachments = resource_attachments_from_payload(
+        &payload.name,
+        payload.application_id.as_deref(),
+        payload.connection_profile.as_deref(),
+        payload.attachments.as_ref(),
+    )?;
+
+    if payload.name == "s3" {
+        return create_s3_resource(scope, client, scheduler, payload, attachments).await;
     }
 
     let version = payload
@@ -456,12 +635,6 @@ pub async fn create(
     validate_docker_tag(&client, docker_image, &version).await?;
 
     let id = Uuid::new_v4();
-    let attachments = resource_attachments_from_payload(
-        &payload.name,
-        payload.application_id.as_deref(),
-        payload.connection_profile.as_deref(),
-        payload.attachments.as_ref(),
-    )?;
 
     let mut tx = scope
         .pool
@@ -578,6 +751,149 @@ pub async fn create(
     }))
 }
 
+async fn create_s3_resource(
+    scope: ProjectScope,
+    client: web::Data<Client>,
+    scheduler: web::Data<Scheduler>,
+    payload: web::Json<CreateResourcePayload>,
+    attachments: Vec<ResourceAttachment>,
+) -> Result<HttpResponse, actix_web::Error> {
+    let id = Uuid::new_v4();
+    let bucket_name = id.simple().to_string();
+
+    let instance = garage::ensure_running(scope.pool.get_ref(), &scheduler, &client)
+        .await
+        .map_err(|e| error::ErrorInternalServerError(format!("Failed to start Garage: {e}")))?;
+
+    let creds = garage::create_bucket_and_key(&client, &instance, &bucket_name, &id.to_string())
+        .await
+        .map_err(|e| error::ErrorInternalServerError(format!("Failed to create S3 bucket: {e}")))?;
+
+    let mut tx = scope
+        .pool
+        .begin()
+        .await
+        .map_err(error::ErrorInternalServerError)?;
+
+    sqlx::query(
+        "INSERT INTO services (id, project_id, display_name, name, version) VALUES ($1, $2, $3, $4, 'latest')",
+    )
+    .bind(id)
+    .bind(scope.project.id)
+    .bind(&payload.display_name)
+    .bind(&payload.name)
+    .execute(&mut *tx)
+    .await
+    .map_err(|e| map_resource_insert_error(e, &payload.display_name))?;
+
+    sqlx::query("UPDATE services SET status = 'running' WHERE id = $1")
+        .bind(id)
+        .execute(&mut *tx)
+        .await
+        .map_err(error::ErrorInternalServerError)?;
+
+    sqlx::query(
+        "INSERT INTO s3_buckets (service_id, bucket_id, access_key_id, secret_access_key) VALUES ($1, $2, $3, $4)",
+    )
+    .bind(id)
+    .bind(&creds.bucket_id)
+    .bind(&creds.access_key_id)
+    .bind(&creds.secret_access_key)
+    .execute(&mut *tx)
+    .await
+    .map_err(error::ErrorInternalServerError)?;
+
+    let service_env_map: HashMap<String, String> = [
+        ("S3_ACCESS_KEY_ID".to_string(), creds.access_key_id.clone()),
+        (
+            "S3_SECRET_ACCESS_KEY".to_string(),
+            creds.secret_access_key.clone(),
+        ),
+        ("S3_BUCKET".to_string(), bucket_name.clone()),
+    ]
+    .into();
+
+    for (key, value) in &service_env_map {
+        sqlx::query!(
+            "INSERT INTO service_env_vars (service_id, key, value) VALUES ($1, $2, $3)",
+            id,
+            key,
+            value,
+        )
+        .execute(&mut *tx)
+        .await
+        .map_err(error::ErrorInternalServerError)?;
+    }
+
+    for attachment in &attachments {
+        let app_uuid = Uuid::parse_str(&attachment.application_id)
+            .map_err(|_| error::ErrorBadRequest("Invalid application_id"))?;
+        sqlx::query(
+            "INSERT INTO application_services (application_id, service_id, connection_profile) VALUES ($1, $2, $3)",
+        )
+        .bind(app_uuid)
+        .bind(id)
+        .bind(&attachment.connection_profile)
+        .execute(&mut *tx)
+        .await
+        .map_err(error::ErrorInternalServerError)?;
+
+        inject_service_env_into_app(
+            &mut tx,
+            app_uuid,
+            "s3",
+            garage::CONTAINER_NAME,
+            garage::S3_PORT,
+            &service_env_map,
+            Some(attachment.connection_profile.as_str()),
+        )
+        .await
+        .map_err(error::ErrorInternalServerError)?;
+    }
+
+    tx.commit().await.map_err(error::ErrorInternalServerError)?;
+
+    for attachment in &attachments {
+        let app_uuid = Uuid::parse_str(&attachment.application_id)
+            .map_err(|_| error::ErrorBadRequest("Invalid application_id"))?;
+        let app = sqlx::query_as::<_, crate::registry::App>(
+            "SELECT id, project_id, name, image_id, container_id, internal_port, port, status, base_domain, created_at FROM applications WHERE id = $1",
+        )
+        .bind(app_uuid)
+        .fetch_optional(scope.pool.get_ref())
+        .await
+        .map_err(error::ErrorInternalServerError)?;
+
+        if let Some(app) = app {
+            let project = Registry::get_project_by_id(scope.pool.get_ref(), app.project_id)
+                .await
+                .map_err(error::ErrorInternalServerError)?
+                .ok_or_else(|| error::ErrorInternalServerError("Project not found"))?;
+            scheduler
+                .ensure_container_on_network(&project.network_name, garage::CONTAINER_NAME)
+                .await
+                .map_err(|e| {
+                    error::ErrorInternalServerError(format!(
+                        "Failed to connect Garage to project network: {e}"
+                    ))
+                })?;
+        }
+    }
+
+    Ok(HttpResponse::Created().json(Resource {
+        id: id.to_string(),
+        project_id: scope.project.id.to_string(),
+        display_name: payload.display_name.clone(),
+        name: payload.name.clone(),
+        version: "latest".to_string(),
+        status: "running".to_string(),
+        application_ids: attachments
+            .iter()
+            .map(|a| a.application_id.clone())
+            .collect(),
+    }))
+}
+
 #[utoipa::path(
     get,
     path = "/resource",
@@ -661,13 +977,19 @@ pub async fn update(
     let uuid = Uuid::parse_str(&id).map_err(|_| error::ErrorBadRequest("Invalid resource id"))?;
 
     if let Some(version) = &payload.version {
-        let service = sqlx::query!("SELECT name FROM services WHERE id = $1", uuid)
+        let service = sqlx::query("SELECT name FROM services WHERE id = $1")
+            .bind(uuid)
             .fetch_optional(pool.get_ref())
             .await
             .map_err(error::ErrorInternalServerError)?
             .ok_or_else(|| error::ErrorNotFound("Resource not found"))?;
-        let docker_image = docker_image_for_service(&service.name);
-        validate_docker_tag(&client, docker_image, version).await?;
+        let service_name: String = service
+            .try_get("name")
+            .map_err(error::ErrorInternalServerError)?;
+        if service_name != "s3" {
+            let docker_image = docker_image_for_service(&service_name);
+            validate_docker_tag(&client, docker_image, version).await?;
+        }
     }
 
     let mut tx = pool
@@ -695,6 +1017,7 @@ pub async fn update(
     }
 
     let mut attached_app_uuids = Vec::new();
+    let mut is_s3 = false;
 
     if payload.application_ids.is_some() || payload.attachments.is_some() {
         let service_info = sqlx::query("SELECT name, container_id FROM services WHERE id = $1")
@@ -708,6 +1031,7 @@ pub async fn update(
         let container_id: Option<String> = service_info
             .try_get("container_id")
             .map_err(error::ErrorInternalServerError)?;
+        is_s3 = service_name == "s3";
 
         let attachments = if let Some(attachments) = &payload.attachments {
             resource_attachments_from_payload(&service_name, None, None, Some(attachments))?
@@ -780,14 +1104,66 @@ pub async fn update(
                 .await
                 .map_err(error::ErrorInternalServerError)?;
             }
+        } else if is_s3 {
+            let service_env: HashMap<String, String> = sqlx::query!(
+                "SELECT key, value FROM service_env_vars WHERE service_id = $1 ORDER BY key",
+                uuid
+            )
+            .fetch_all(&mut *tx)
+            .await
+            .map_err(error::ErrorInternalServerError)?
+            .into_iter()
+            .map(|r| (r.key, r.value))
+            .collect();
+
+            for (app_uuid, connection_profile) in &app_uuids {
+                inject_service_env_into_app(
+                    &mut tx,
+                    *app_uuid,
+                    "s3",
+                    garage::CONTAINER_NAME,
+                    garage::S3_PORT,
+                    &service_env,
+                    Some(connection_profile.as_str()),
+                )
+                .await
+                .map_err(error::ErrorInternalServerError)?;
+            }
         }
     }
 
     tx.commit().await.map_err(error::ErrorInternalServerError)?;
 
     if !attached_app_uuids.is_empty() {
-        ensure_attached_service_network(pool.get_ref(), &scheduler, uuid, &attached_app_uuids)
-            .await?;
+        if is_s3 {
+            for app_uuid in &attached_app_uuids {
+                let Some(app) = sqlx::query_as::<_, crate::registry::App>(
+                    "SELECT id, project_id, name, image_id, container_id, internal_port, port, status, base_domain, created_at FROM applications WHERE id = $1",
+                )
+                .bind(app_uuid)
+                .fetch_optional(pool.get_ref())
+                .await
+                .map_err(error::ErrorInternalServerError)?
+                else {
+                    continue;
+                };
+                let project = Registry::get_project_by_id(pool.get_ref(), app.project_id)
+                    .await
+                    .map_err(error::ErrorInternalServerError)?
+                    .ok_or_else(|| error::ErrorInternalServerError("Project not found"))?;
+                scheduler
+                    .ensure_container_on_network(&project.network_name, garage::CONTAINER_NAME)
+                    .await
+                    .map_err(|e| {
+                        error::ErrorInternalServerError(format!(
+                            "Failed to connect Garage to project network: {e}"
+                        ))
+                    })?;
+            }
+        } else {
+            ensure_attached_service_network(pool.get_ref(), &scheduler, uuid, &attached_app_uuids)
+                .await?;
+        }
     }
 
     Ok(HttpResponse::Ok().body("Resource successfully updated"))
@@ -820,11 +1196,18 @@ pub async fn start(
             .await
             .map_err(error::ErrorInternalServerError)?
             .ok_or_else(|| error::ErrorNotFound("Resource not found"))?;
-    let project_id: Uuid = service
-        .try_get("project_id")
-        .map_err(error::ErrorInternalServerError)?;
     let service_name: String = service
         .try_get("name")
+        .map_err(error::ErrorInternalServerError)?;
+
+    if service_name == "s3" {
+        return Err(error::ErrorBadRequest(
+            "S3 resources share a single Garage instance — start/stop not supported per bucket",
+        ));
+    }
+
+    let project_id: Uuid = service
+        .try_get("project_id")
         .map_err(error::ErrorInternalServerError)?;
     let version: String = service
         .try_get("version")
@@ -896,13 +1279,26 @@ pub async fn stop(
     id: web::Path<String>,
 ) -> Result<impl Responder, actix_web::Error> {
     let uuid = Uuid::parse_str(&id).map_err(|_| error::ErrorBadRequest("Invalid resource id"))?;
-    let service = sqlx::query!("SELECT status FROM services WHERE id = $1", uuid)
+    let service = sqlx::query("SELECT name, status FROM services WHERE id = $1")
+        .bind(uuid)
         .fetch_optional(pool.get_ref())
         .await
         .map_err(error::ErrorInternalServerError)?
         .ok_or_else(|| error::ErrorNotFound("Resource not found"))?;
+    let service_name: String = service
+        .try_get("name")
+        .map_err(error::ErrorInternalServerError)?;
+    let service_status: String = service
+        .try_get("status")
+        .map_err(error::ErrorInternalServerError)?;
 
-    if service.status == "stopped" {
+    if service_name == "s3" {
+        return Err(error::ErrorBadRequest(
+            "S3 resources share a single Garage instance — start/stop not supported per bucket",
+        ));
+    }
+
+    if service_status == "stopped" {
         return Err(error::ErrorConflict("Resource is already stopped"));
     }
 
@@ -937,17 +1333,60 @@ pub async fn stop(
 #[delete("/resource/{id}")]
 pub async fn delete(
     pool: web::Data<PgPool>,
+    client: web::Data<Client>,
     scheduler: web::Data<Scheduler>,
     id: web::Path<String>,
 ) -> Result<impl Responder, actix_web::Error> {
     let uuid = Uuid::parse_str(&id).map_err(|_| error::ErrorBadRequest("Invalid resource id"))?;
-    let service = sqlx::query!("SELECT status FROM services WHERE id = $1", uuid)
+    let service = sqlx::query("SELECT name, status FROM services WHERE id = $1")
+        .bind(uuid)
         .fetch_optional(pool.get_ref())
         .await
         .map_err(error::ErrorInternalServerError)?
         .ok_or_else(|| error::ErrorNotFound("Resource not found"))?;
+    let service_name: String = service
+        .try_get("name")
+        .map_err(error::ErrorInternalServerError)?;
+    let service_status: String = service
+        .try_get("status")
+        .map_err(error::ErrorInternalServerError)?;
 
-    if service.status == "running" {
+    if service_name == "s3" {
+        if let Some(bucket_row) =
+            sqlx::query("SELECT bucket_id, access_key_id FROM s3_buckets WHERE service_id = $1")
+                .bind(uuid)
+                .fetch_optional(pool.get_ref())
+                .await
+                .map_err(error::ErrorInternalServerError)?
+        {
+            let bucket_id: String = bucket_row
+                .try_get("bucket_id")
+                .map_err(error::ErrorInternalServerError)?;
+            let access_key_id: String = bucket_row
+                .try_get("access_key_id")
+                .map_err(error::ErrorInternalServerError)?;
+            if let Some(instance_row) =
+                sqlx::query("SELECT admin_port, admin_token FROM s3_instance LIMIT 1")
+                    .fetch_optional(pool.get_ref())
+                    .await
+                    .map_err(error::ErrorInternalServerError)?
+            {
+                let admin_port: i32 = instance_row
+                    .try_get("admin_port")
+                    .map_err(error::ErrorInternalServerError)?;
+                let admin_token: String = instance_row
+                    .try_get("admin_token")
+                    .map_err(error::ErrorInternalServerError)?;
+                let instance = garage::GarageInstance {
+                    admin_port: admin_port as u16,
+                    admin_token,
+                };
+                let _ =
+                    garage::delete_bucket_and_key(&client, &instance, &bucket_id, &access_key_id)
+                        .await;
+            }
+        }
+    } else if service_status == "running" {
         scheduler
             .stop_service(&uuid.to_string())
             .await
@@ -989,15 +1428,25 @@ pub async fn logs(
     query: web::Query<LogsQuery>,
 ) -> Result<impl Responder, actix_web::Error> {
     let uuid = Uuid::parse_str(&id).map_err(|_| error::ErrorBadRequest("Invalid resource id"))?;
-    sqlx::query!("SELECT id FROM services WHERE id = $1", uuid)
+    let service = sqlx::query("SELECT name FROM services WHERE id = $1")
+        .bind(uuid)
         .fetch_optional(pool.get_ref())
         .await
         .map_err(error::ErrorInternalServerError)?
         .ok_or_else(|| error::ErrorNotFound("Resource not found"))?;
+    let service_name: String = service
+        .try_get("name")
+        .map_err(error::ErrorInternalServerError)?;
+
+    let container_name = if service_name == "s3" {
+        garage::CONTAINER_NAME.to_string()
+    } else {
+        uuid.to_string()
+    };
 
     if query.follow.unwrap_or(false) {
         let stream = scheduler
-            .get_logs_stream(uuid.to_string(), query.tail)
+            .get_logs_stream(container_name, query.tail)
             .map(|r| match r {
                 Ok(s) => Ok(web::Bytes::from(s)),
                 Err(e) => Err(error::ErrorInternalServerError(e)),
@@ -1008,7 +1457,7 @@ pub async fn logs(
     }
 
     let logs = scheduler
-        .get_logs(&uuid.to_string(), query.tail)
+        .get_logs(&container_name, query.tail)
         .await
         .map_err(|e| error::ErrorInternalServerError(format!("Failed to get logs: {e}")))?;
 

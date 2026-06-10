@@ -1,6 +1,7 @@
 mod docker;
 mod engine;
 mod extractor;
+mod garage;
 mod handlers;
 mod models;
 mod registry;

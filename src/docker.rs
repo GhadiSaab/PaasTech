@@ -166,6 +166,25 @@ pub fn connection_env_vars_for_service(
                 "S3_ENDPOINT_URL".into(),
                 format!("http://{}:{}", service_host, service_port),
             ),
+            ("S3_REGION".into(), "fr-south-1".into()),
+            (
+                "S3_ACCESS_KEY_ID".into(),
+                service_env
+                    .get("S3_ACCESS_KEY_ID")
+                    .cloned()
+                    .unwrap_or_default(),
+            ),
+            (
+                "S3_SECRET_ACCESS_KEY".into(),
+                service_env
+                    .get("S3_SECRET_ACCESS_KEY")
+                    .cloned()
+                    .unwrap_or_default(),
+            ),
+            (
+                "S3_BUCKET".into(),
+                service_env.get("S3_BUCKET").cloned().unwrap_or_default(),
+            ),
         ]),
         _ => Ok(vec![
             (format!("{}_HOST", name.to_uppercase()), host),
