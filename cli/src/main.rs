@@ -31,6 +31,12 @@ enum Commands {
         #[arg(long, default_value = "8080", value_parser = clap::value_parser!(u16).range(1..))]
         port: u16,
     },
+    /// Redeploy the current project with zero downtime; requires a prior deployment
+    Update {
+        /// Fallback port for projects without process declarations
+        #[arg(long, default_value = "8080", value_parser = clap::value_parser!(u16).range(1..))]
+        port: u16,
+    },
     /// Manage the active project
     Project {
         #[command(subcommand)]
@@ -302,6 +308,7 @@ async fn async_main() {
     let result = match cli.command {
         Commands::Init { name } => projects::init(&name).await,
         Commands::Deploy { port } => apps::deploy_current_dir(port).await,
+        Commands::Update { port } => apps::update_current_dir(port).await,
         Commands::Project { command } => match command {
             ProjectCommands::Info => projects::info().await,
             ProjectCommands::List => projects::list().await,
