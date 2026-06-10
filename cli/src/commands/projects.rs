@@ -133,6 +133,39 @@ pub async fn list() -> Result<(), String> {
     Ok(())
 }
 
+pub async fn delete(name: &str) -> Result<(), String> {
+    let url = format!("{}/project/{}", api_base(), name);
+    let client = reqwest::Client::new();
+    let resp = client
+        .delete(&url)
+        .send()
+        .await
+        .map_err(|e| format!("Request failed: {e}"))?;
+
+    match resp.status().as_u16() {
+        204 => {
+            if let Ok(Some(path)) = find_manifest() {
+                if let Ok(manifest_name) = read_project_name(&path) {
+                    if manifest_name == name {
+                        let _ = std::fs::remove_file(&path);
+                    }
+                }
+            }
+            println!("{} Project {} deleted", "✓".green(), name.bold());
+            Ok(())
+        }
+        400 => {
+            let text = resp.text().await.unwrap_or_default();
+            Err(text)
+        }
+        404 => Err(format!("Project '{}' not found", name)),
+        code => {
+            let text = resp.text().await.unwrap_or_default();
+            Err(format!("Server error ({}): {}", code, text))
+        }
+    }
+}
+
 pub async fn env_set(pair: &str) -> Result<(), String> {
     let project = require_project()?;
     let (key, value) = pair
