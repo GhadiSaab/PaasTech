@@ -88,4 +88,17 @@ CREATE TABLE IF NOT EXISTS application_env_vars (
     PRIMARY KEY (application_id, key)
 );
 
+CREATE TABLE IF NOT EXISTS s3_instance (
+    container_id VARCHAR(64) NOT NULL,
+    admin_port INTEGER NOT NULL,
+    admin_token VARCHAR(255) NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS s3_buckets (
+    service_id UUID PRIMARY KEY REFERENCES services(id) ON DELETE CASCADE,
+    bucket_id VARCHAR(255) NOT NULL,
+    access_key_id VARCHAR(255) NOT NULL,
+    secret_access_key VARCHAR(255) NOT NULL
+);
+
 END;
