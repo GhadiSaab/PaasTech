@@ -613,8 +613,13 @@ pub async fn update(
     }
     let removed_processes: Vec<_> = existing_by_name.into_values().collect();
 
-    if let Err(e) =
-        Registry::update_status(&scope.pool, scope.project.id, &app_name, crate::status::UPDATING).await
+    if let Err(e) = Registry::update_status(
+        &scope.pool,
+        scope.project.id,
+        &app_name,
+        crate::status::UPDATING,
+    )
+    .await
     {
         let _ = fs::remove_dir_all(&extracted_folder).await;
         eprintln!("registry: failed to mark {app_name} updating: {e}");
@@ -634,8 +639,13 @@ pub async fn update(
         .await
         {
             let _ = fs::remove_dir_all(&extracted_folder).await;
-            let _ =
-                Registry::update_status(&scope.pool, scope.project.id, &app_name, crate::status::FAILED).await;
+            let _ = Registry::update_status(
+                &scope.pool,
+                scope.project.id,
+                &app_name,
+                crate::status::FAILED,
+            )
+            .await;
             return Err(e);
         }
     }
@@ -794,15 +804,24 @@ pub async fn update(
         }
 
         let _ = fs::remove_dir_all(&extracted_folder).await;
-        let deploy_status = if failed { crate::status::FAILED } else { crate::status::RUNNING };
+        let deploy_status = if failed {
+            crate::status::FAILED
+        } else {
+            crate::status::RUNNING
+        };
         let _ = Registry::update_status(&pool_bg, project_id, &app_name_bg, deploy_status).await;
     });
     tokio::spawn(async move {
         if let Err(e) = handle.await {
             eprintln!("update task panicked for {app_name_panic}: {e}");
             let _ = fs::remove_dir_all(&extracted_folder_panic).await;
-            let _ =
-                Registry::update_status(&pool_panic, project_id, &app_name_panic, crate::status::FAILED).await;
+            let _ = Registry::update_status(
+                &pool_panic,
+                project_id,
+                &app_name_panic,
+                crate::status::FAILED,
+            )
+            .await;
         }
     });
 
