@@ -290,9 +290,6 @@ pub fn api_base() -> String {
 }
 
 fn main() {
-    // Doit s'exécuter avant le runtime tokio : les completers utilisent reqwest::blocking
-    // qui crée son propre runtime interne (incompatible avec un runtime tokio existant).
-    // Si COMPLETE est défini, génère les complétions et quitte le processus.
     CompleteEnv::with_factory(Cli::command).complete();
 
     tokio::runtime::Builder::new_multi_thread()

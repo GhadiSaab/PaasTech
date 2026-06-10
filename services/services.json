@@ -25,12 +25,6 @@
     "docker_image": "dxflrs/garage",
     "container_image": "dxflrs/garage",
     "port": 3900,
-    "env_vars": [
-      { "key": "GARAGE_RPC_SECRET", "generate": "uuid_hex64" }
-    ],
-    "config_file": {
-      "template": "garage.toml",
-      "container_path": "/etc/garage.toml"
-    }
+    "env_vars": []
   }
 }

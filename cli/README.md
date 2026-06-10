@@ -2,6 +2,25 @@
 
 `paastech` - deploy and manage your applications from the terminal.
 
+## Install CLI Development
+
+```bash
+cargo install --path .
+```
+
+## Configuration
+
+### `PAAS_API_URL`
+
+URL of the PaasTech API. Default: `http://127.0.0.1:8080`.
+
+```bash
+export PAAS_API_URL=https://api.paastech.polydo.dev
+paastech <command>
+```
+
+---
+
 ## Shell completion
 
 The CLI supports two completion modes:
