@@ -26,13 +26,16 @@ use uuid::Uuid;
 #[derive(Debug)]
 pub enum DeployError {
     PortRequired(String),
+    RolledBack(String),
     Other(String),
 }
 
 impl std::fmt::Display for DeployError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::PortRequired(message) | Self::Other(message) => f.write_str(message),
+            Self::PortRequired(message) | Self::RolledBack(message) | Self::Other(message) => {
+                f.write_str(message)
+            }
         }
     }
 }

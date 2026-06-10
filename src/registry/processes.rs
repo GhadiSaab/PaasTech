@@ -143,6 +143,41 @@ impl Registry {
         .await
     }
 
+    pub async fn get_active_process(
+        pool: &PgPool,
+        process_id: Uuid,
+    ) -> Result<Option<ActiveAppProcess>, sqlx::Error> {
+        sqlx::query_as::<_, ActiveAppProcess>(
+            r#"
+            SELECT
+                p.id,
+                a.project_id,
+                pr.network_name AS project_network,
+                p.application_id,
+                a.name AS app_name,
+                p.name AS process_name,
+                p.process_type,
+                p.build_context,
+                p.public_host,
+                p.build_env,
+                p.image_id,
+                p.container_id,
+                p.internal_port,
+                p.host_port,
+                p.status,
+                a.base_domain
+            FROM application_processes p
+            JOIN applications a ON a.id = p.application_id
+            JOIN projects pr ON pr.id = a.project_id
+            WHERE p.id = $1
+              AND p.status IN ('running', 'crashed')
+            "#,
+        )
+        .bind(process_id)
+        .fetch_optional(pool)
+        .await
+    }
+
     pub async fn update_process_running(
         pool: &PgPool,
         process_id: Uuid,
