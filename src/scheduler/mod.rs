@@ -138,6 +138,14 @@ pub(super) fn build_traefik_labels(
             format!("traefik.http.routers.{router_name}.tls.certresolver"),
             "letsencrypt".to_string(),
         );
+        labels.insert(
+            format!("traefik.http.routers.{router_name}.tls.domains[0].main"),
+            base_domain.to_string(),
+        );
+        labels.insert(
+            format!("traefik.http.routers.{router_name}.tls.domains[0].sans"),
+            format!("*.{base_domain}"),
+        );
     }
 
     labels
@@ -979,6 +987,14 @@ mod tests {
         );
         assert!(!labels.contains_key("traefik.http.routers.api.rule"));
         assert!(!labels.contains_key("traefik.http.routers.api.service"));
+        assert_eq!(
+            labels.get("traefik.http.routers.api-123.tls.domains[0].main"),
+            Some(&"example.com".to_string())
+        );
+        assert_eq!(
+            labels.get("traefik.http.routers.api-123.tls.domains[0].sans"),
+            Some(&"*.example.com".to_string())
+        );
     }
 
     #[test]
@@ -997,6 +1013,23 @@ mod tests {
             labels.get("traefik.http.services.app-api-123.loadbalancer.server.port"),
             Some(&"8000".to_string())
         );
+        assert_eq!(
+            labels.get("traefik.http.routers.app-api-123.tls.domains[0].main"),
+            Some(&"example.com".to_string())
+        );
+        assert_eq!(
+            labels.get("traefik.http.routers.app-api-123.tls.domains[0].sans"),
+            Some(&"*.example.com".to_string())
+        );
+    }
+
+    #[test]
+    fn build_traefik_labels_does_not_add_tls_domains_for_localhost() {
+        let labels = build_traefik_labels("app", None, 8080, "123", "localhost", None);
+
+        assert!(!labels.contains_key("traefik.http.routers.app-123.tls.domains[0].main"));
+        assert!(!labels.contains_key("traefik.http.routers.app-123.tls.domains[0].sans"));
+        assert!(!labels.contains_key("traefik.http.routers.app-123.tls"));
     }
 
     #[test]
