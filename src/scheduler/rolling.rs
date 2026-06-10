@@ -24,6 +24,7 @@ impl Scheduler {
         project_id: Uuid,
         network_name: &str,
         app_name: &str,
+        process_id: Uuid,
         process_name: &str,
         new_image: &str,
         internal_port: Option<u16>,
@@ -31,21 +32,7 @@ impl Scheduler {
         public_host: Option<&str>,
         base_domain: Option<&str>,
     ) -> Result<(), DeployError> {
-        let existing = Registry::get_in_project(pool, project_id, app_name)
-            .await
-            .map_err(|e| DeployError::Other(format!("Failed to load app {app_name}: {e}")))?
-            .ok_or_else(|| DeployError::AppNotFound(format!("app not found: {app_name}")))?;
-        let process = Registry::list_processes(pool, existing.id)
-            .await
-            .map_err(|e| {
-                DeployError::Other(format!("Failed to load processes for {app_name}: {e}"))
-            })?
-            .into_iter()
-            .find(|process| process.name == process_name)
-            .ok_or_else(|| {
-                DeployError::AppNotFound(format!("process not found: {app_name}/{process_name}"))
-            })?;
-        let domain = resolve_domain(base_domain.or(existing.base_domain.as_deref()));
+        let domain = resolve_domain(base_domain);
         let image = self.pull(new_image).await?;
         let internal_port = self.resolve_internal_port(&image, internal_port).await?;
 
@@ -327,7 +314,7 @@ impl Scheduler {
         for attempt in 1..=3 {
             match Registry::update_process_running(
                 pool,
-                process.id,
+                process_id,
                 &image,
                 &final_id,
                 Some(internal_port as i32),

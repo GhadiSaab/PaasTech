@@ -5,7 +5,7 @@ use reqwest::Client;
 use serde::Deserialize;
 use serde_json::json;
 use sqlx::{PgPool, Row};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use tokio::fs;
 use uuid::Uuid;
 
@@ -266,6 +266,7 @@ async fn handle_upload(
     let scheduler_bg = scheduler.clone();
     let name_bg = name.clone();
     let name_panic = name.clone();
+    let extracted_folder_panic = extracted_folder.clone();
     let handle = tokio::spawn(async move {
         let mut failed = false;
 
@@ -348,6 +349,7 @@ async fn handle_upload(
     tokio::spawn(async move {
         if let Err(e) = handle.await {
             eprintln!("deploy task panicked for {name_panic}: {e}");
+            let _ = fs::remove_dir_all(&extracted_folder_panic).await;
             let _ = Registry::update_status(&pool_panic, project_id, &name_panic, "failed").await;
         }
     });
@@ -557,10 +559,6 @@ pub async fn update(
         .into_iter()
         .map(|process| (process.name.clone(), process))
         .collect();
-    let desired_names: HashSet<_> = processes
-        .iter()
-        .map(|process| process.name.clone())
-        .collect();
 
     let mut process_rows = Vec::new();
     for process in &processes {
@@ -613,13 +611,10 @@ pub async fn update(
         };
         process_rows.push((process.clone(), row, existed));
     }
-    let removed_processes: Vec<_> = existing_by_name
-        .into_values()
-        .filter(|process| !desired_names.contains(&process.name))
-        .collect();
+    let removed_processes: Vec<_> = existing_by_name.into_values().collect();
 
     if let Err(e) =
-        Registry::update_status(&scope.pool, scope.project.id, &app_name, "updating").await
+        Registry::update_status(&scope.pool, scope.project.id, &app_name, crate::status::UPDATING).await
     {
         let _ = fs::remove_dir_all(&extracted_folder).await;
         eprintln!("registry: failed to mark {app_name} updating: {e}");
@@ -640,7 +635,7 @@ pub async fn update(
         {
             let _ = fs::remove_dir_all(&extracted_folder).await;
             let _ =
-                Registry::update_status(&scope.pool, scope.project.id, &app_name, "failed").await;
+                Registry::update_status(&scope.pool, scope.project.id, &app_name, crate::status::FAILED).await;
             return Err(e);
         }
     }
@@ -653,6 +648,7 @@ pub async fn update(
     let app_name_bg = app_name.clone();
     let app_name_panic = app_name.clone();
     let base_domain = app.base_domain.clone();
+    let extracted_folder_panic = extracted_folder.clone();
     let handle = tokio::spawn(async move {
         let mut failed = false;
 
@@ -698,6 +694,7 @@ pub async fn update(
                             project_id,
                             &project_network,
                             &app_name_bg,
+                            row.id,
                             &process.name,
                             &image_name,
                             process.port,
@@ -797,14 +794,15 @@ pub async fn update(
         }
 
         let _ = fs::remove_dir_all(&extracted_folder).await;
-        let deploy_status = if failed { "failed" } else { "running" };
+        let deploy_status = if failed { crate::status::FAILED } else { crate::status::RUNNING };
         let _ = Registry::update_status(&pool_bg, project_id, &app_name_bg, deploy_status).await;
     });
     tokio::spawn(async move {
         if let Err(e) = handle.await {
             eprintln!("update task panicked for {app_name_panic}: {e}");
+            let _ = fs::remove_dir_all(&extracted_folder_panic).await;
             let _ =
-                Registry::update_status(&pool_panic, project_id, &app_name_panic, "failed").await;
+                Registry::update_status(&pool_panic, project_id, &app_name_panic, crate::status::FAILED).await;
         }
     });
 
@@ -1113,13 +1111,13 @@ pub async fn status(
         worst
     };
 
-    let db_status = app.status.as_deref().unwrap_or("unknown");
+    let db_status = app.status.as_deref().unwrap_or(crate::status::UNKNOWN);
     let status = match db_status {
-        // "failed" and "updating" must win over Docker state: a rolling update
+        // FAILED and UPDATING must win over Docker state: a rolling update
         // leaves the old container running, so Docker always reports "running"
         // even when the update failed or is still in progress.
-        "failed" | "updating" => db_status.to_string(),
-        _ if docker_status == "unknown" => db_status.to_string(),
+        s if s == crate::status::FAILED || s == crate::status::UPDATING => db_status.to_string(),
+        _ if docker_status == crate::status::UNKNOWN => db_status.to_string(),
         _ => docker_status,
     };
     HttpResponse::Ok().body(status)

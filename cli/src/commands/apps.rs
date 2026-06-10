@@ -374,7 +374,6 @@ pub async fn update_current_dir(port: u16) -> Result<(), String> {
         .await
         .map_err(|e| format!("Failed to stat archive: {e}"))?
         .len();
-    let _ = std::fs::remove_file(&archive);
 
     let pb = spinner(&format!("Uploading {} for rolling update...", app_name));
     let part = reqwest::multipart::Part::stream_with_length(file, file_size)
@@ -396,6 +395,7 @@ pub async fn update_current_dir(port: u16) -> Result<(), String> {
         .send()
         .await
         .map_err(|e| format!("Request failed: {e}"))?;
+    let _ = std::fs::remove_file(&archive);
     pb.finish_and_clear();
 
     if !resp.status().is_success() {
