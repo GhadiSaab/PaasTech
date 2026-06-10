@@ -145,12 +145,11 @@ pub async fn delete(name: &str) -> Result<(), String> {
 
     match resp.status().as_u16() {
         204 => {
-            if let Ok(Some(path)) = find_manifest() {
-                if let Ok(manifest_name) = read_project_name(&path) {
-                    if manifest_name == name {
-                        let _ = std::fs::remove_file(&path);
-                    }
-                }
+            if let Ok(Some(path)) = find_manifest()
+                && let Ok(manifest_name) = read_project_name(&path)
+                && manifest_name == name
+            {
+                let _ = std::fs::remove_file(&path);
             }
             println!("{} Project {} deleted", "✓".green(), name.bold());
             Ok(())
