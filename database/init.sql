@@ -58,9 +58,13 @@ CREATE TABLE IF NOT EXISTS application_processes (
     internal_port INTEGER NULL,
     host_port INTEGER NULL,
     status VARCHAR(20) NOT NULL DEFAULT 'building',
+    replica_group VARCHAR(50) NULL,
     created_at TIMESTAMP NOT NULL DEFAULT now(),
     UNIQUE(application_id, name)
 );
+
+ALTER TABLE application_processes
+ADD COLUMN IF NOT EXISTS replica_group VARCHAR(50) NULL;
 
 CREATE TABLE IF NOT EXISTS service_env_vars (
     service_id UUID NOT NULL REFERENCES services(id) ON DELETE CASCADE,

@@ -24,27 +24,10 @@ async fn build_pool() -> web::Data<PgPool> {
     let pool = PgPool::connect(&url)
         .await
         .expect("Failed to connect to test DB");
-    sqlx::query("SELECT pg_advisory_lock(747070)")
+    sqlx::raw_sql(include_str!("../database/init.sql"))
         .execute(&pool)
         .await
-        .expect("Failed to lock test schema setup");
-    sqlx::query(
-        r#"
-        CREATE TABLE IF NOT EXISTS process_env_vars (
-            process_id UUID NOT NULL REFERENCES application_processes(id) ON DELETE CASCADE,
-            key VARCHAR(255) NOT NULL,
-            value TEXT NOT NULL,
-            PRIMARY KEY (process_id, key)
-        )
-        "#,
-    )
-    .execute(&pool)
-    .await
-    .expect("Failed to prepare test process_env_vars table");
-    sqlx::query("SELECT pg_advisory_unlock(747070)")
-        .execute(&pool)
-        .await
-        .expect("Failed to unlock test schema setup");
+        .expect("Failed to apply schema in test DB");
     web::Data::new(pool)
 }
 
@@ -71,6 +54,7 @@ async fn insert_test_app_process(pool: &PgPool, name: &str, status: &str) -> Uui
         json!({}),
         Some(8080),
         status,
+        None,
     )
     .await
     .expect("Failed to insert test process");

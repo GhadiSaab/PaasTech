@@ -108,6 +108,11 @@ async fn main() -> std::io::Result<()> {
         .await
         .expect("Failed to connect to PostgreSQL");
 
+    sqlx::raw_sql(include_str!("../database/init.sql"))
+        .execute(&pool)
+        .await
+        .expect("Failed to apply database schema");
+
     let http_client = Client::new();
     let scheduler = Scheduler::new();
     let watcher_pool = pool.clone();

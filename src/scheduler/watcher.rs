@@ -90,6 +90,7 @@ impl Scheduler {
                 process.base_domain.as_deref(),
                 process.public_host.as_deref(),
                 env_vars,
+                process.replica_group.as_deref(),
             )
             .await
         {

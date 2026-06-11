@@ -50,6 +50,10 @@ pub struct ProcessDefinition {
     pub public_host: Option<String>,
     #[serde(default)]
     pub build_env: HashMap<String, String>,
+    /// Set to the original process name when this is one of several replicas.
+    /// All replicas in the same group share a single Traefik service for load balancing.
+    #[serde(skip)]
+    pub replica_group: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -134,6 +138,7 @@ pub fn load_process_definitions(
             port: fallback_port,
             public_host: None,
             build_env: HashMap::new(),
+            replica_group: None,
         };
         validate_process_definition(root, &fallback)?;
         return Ok(vec![fallback]);
@@ -152,6 +157,7 @@ pub fn load_process_definitions(
             port: fallback_port,
             public_host: None,
             build_env: HashMap::new(),
+            replica_group: None,
         };
         validate_process_definition(root, &fallback)?;
         return Ok(vec![fallback]);
@@ -173,6 +179,7 @@ pub fn load_process_definitions(
                 port: entry.port,
                 public_host: entry.public_host,
                 build_env: entry.build_env,
+                replica_group: None,
             });
         } else {
             for i in 1..=entry.replicas {
@@ -183,6 +190,7 @@ pub fn load_process_definitions(
                     port: entry.port,
                     public_host: entry.public_host.clone(),
                     build_env: entry.build_env.clone(),
+                    replica_group: Some(entry.name.clone()),
                 });
             }
         }

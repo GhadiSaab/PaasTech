@@ -16,16 +16,17 @@ impl Registry {
         build_env: Value,
         internal_port: Option<i32>,
         status: &str,
+        replica_group: Option<&str>,
     ) -> Result<AppProcess, sqlx::Error> {
         sqlx::query_as::<_, AppProcess>(
             r#"
             INSERT INTO application_processes (
                 id, application_id, name, process_type, build_context, public_host, build_env,
-                internal_port, status, created_at
+                internal_port, status, replica_group, created_at
             )
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, NOW())
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, NOW())
             RETURNING id, application_id, name, process_type, build_context, public_host, build_env,
-                image_id, container_id, internal_port, host_port, status, created_at
+                image_id, container_id, internal_port, host_port, status, replica_group, created_at
             "#,
         )
         .bind(Uuid::new_v4())
@@ -37,6 +38,7 @@ impl Registry {
         .bind(build_env)
         .bind(internal_port)
         .bind(status)
+        .bind(replica_group)
         .fetch_one(pool)
         .await
     }
@@ -48,7 +50,7 @@ impl Registry {
         sqlx::query_as::<_, AppProcess>(
             r#"
             SELECT id, application_id, name, process_type, build_context, public_host, build_env,
-                image_id, container_id, internal_port, host_port, status, created_at
+                image_id, container_id, internal_port, host_port, status, replica_group, created_at
             FROM application_processes
             WHERE application_id = $1
             ORDER BY created_at ASC
@@ -104,6 +106,7 @@ impl Registry {
         build_env: Value,
         internal_port: Option<i32>,
         status: &str,
+        replica_group: Option<&str>,
     ) -> Result<(), sqlx::Error> {
         sqlx::query(
             r#"
@@ -113,8 +116,9 @@ impl Registry {
                 public_host = $3,
                 build_env = $4,
                 internal_port = $5,
-                status = $6
-            WHERE id = $7
+                status = $6,
+                replica_group = $7
+            WHERE id = $8
             "#,
         )
         .bind(process_type)
@@ -123,6 +127,7 @@ impl Registry {
         .bind(build_env)
         .bind(internal_port)
         .bind(status)
+        .bind(replica_group)
         .bind(process_id)
         .execute(pool)
         .await?;
@@ -150,7 +155,8 @@ impl Registry {
                 p.internal_port,
                 p.host_port,
                 p.status,
-                a.base_domain
+                a.base_domain,
+                p.replica_group
             FROM application_processes p
             JOIN applications a ON a.id = p.application_id
             JOIN projects pr ON pr.id = a.project_id
@@ -184,7 +190,8 @@ impl Registry {
                 p.internal_port,
                 p.host_port,
                 p.status,
-                a.base_domain
+                a.base_domain,
+                p.replica_group
             FROM application_processes p
             JOIN applications a ON a.id = p.application_id
             JOIN projects pr ON pr.id = a.project_id
