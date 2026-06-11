@@ -54,6 +54,46 @@ async fn find_apps(names: &[&str]) -> Result<Vec<String>, String> {
         .collect()
 }
 
+async fn app_name_map() -> Result<HashMap<String, String>, String> {
+    let url = match current_project()? {
+        Some(project) => format!("{}/project/{}/app", api_base(), project),
+        None => format!("{}/app", api_base()),
+    };
+    let resp = reqwest::get(url)
+        .await
+        .map_err(|e| format!("Request failed: {e}"))?;
+
+    if !resp.status().is_success() {
+        return Err(format!("Server error: {}", resp.status()));
+    }
+
+    #[derive(Deserialize)]
+    struct AppEntry {
+        id: String,
+        name: String,
+    }
+
+    let apps: Vec<AppEntry> = resp
+        .json()
+        .await
+        .map_err(|e| format!("Failed to parse response: {e}"))?;
+
+    Ok(apps.into_iter().map(|app| (app.id, app.name)).collect())
+}
+
+fn linked_app_names(resource: &Resource, apps: &HashMap<String, String>) -> String {
+    if resource.application_ids.is_empty() {
+        return "-".to_string();
+    }
+
+    resource
+        .application_ids
+        .iter()
+        .map(|id| apps.get(id).map(String::as_str).unwrap_or(id))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
 fn resource_url(id: &str, action: Option<&str>) -> Result<reqwest::Url, String> {
     let raw = match action {
         Some(act) => format!("{}/resource/{}/{}", api_base(), id, act),
@@ -99,7 +139,7 @@ async fn find_resource(name_or_id: &str) -> Result<Resource, String> {
     }
 }
 
-fn print_table(resources: &[Resource]) {
+fn print_table(resources: &[Resource], apps: &HashMap<String, String>) {
     let col_id = 36_usize;
     let col_name = resources
         .iter()
@@ -125,7 +165,12 @@ fn print_table(resources: &[Resource]) {
         .max()
         .unwrap_or(6)
         .max(6);
-    let col_links = 36_usize;
+    let col_links = resources
+        .iter()
+        .map(|r| linked_app_names(r, apps).len())
+        .max()
+        .unwrap_or(11)
+        .max(11);
 
     let sep = format!(
         "+-{}-+-{}-+-{}-+-{}-+-{}-+-{}-+",
@@ -158,11 +203,7 @@ fn print_table(resources: &[Resource]) {
     for r in resources {
         let (status_colored, status_len) = colored_status(&r.status);
         let status_pad = col_status.saturating_sub(status_len);
-        let links = if r.application_ids.is_empty() {
-            "-".to_string()
-        } else {
-            r.application_ids.join(", ")
-        };
+        let links = linked_app_names(r, apps);
 
         println!(
             "| {:<col_id$} | {:<col_name$} | {:<col_type$} | {:<col_version$} | {}{} | {:<col_links$} |",
@@ -321,7 +362,8 @@ pub async fn list() -> Result<(), String> {
         return Ok(());
     }
 
-    print_table(&resources);
+    let apps = app_name_map().await.unwrap_or_default();
+    print_table(&resources, &apps);
     Ok(())
 }
 
@@ -340,17 +382,14 @@ pub async fn info(display_name: &str) -> Result<(), String> {
                 .json()
                 .await
                 .map_err(|e| format!("Failed to parse response: {e}"))?;
+            let apps = app_name_map().await.unwrap_or_default();
             let (status_colored, _) = colored_status(&r.status);
             println!("Name:    {}", r.display_name.bold());
             println!("Type:    {}", r.name);
             println!("Version: {}", r.version);
             println!("Status:  {}", status_colored);
             println!("ID:      {}", r.id);
-            if r.application_ids.is_empty() {
-                println!("Linked:  -");
-            } else {
-                println!("Linked:  {}", r.application_ids.join(", "));
-            }
+            println!("Linked:  {}", linked_app_names(&r, &apps));
         }
         404 => return Err(format!("Resource '{}' not found", display_name)),
         code => return Err(format!("Server error: {}", code)),

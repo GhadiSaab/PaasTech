@@ -74,6 +74,18 @@ impl Scheduler {
 
     async fn recreate_missing_app(&self, pool: &PgPool, app: &App) {
         println!("watch: app {} container is missing, recreating", app.name);
+        sleep(Duration::from_millis(500)).await;
+        let app = match Registry::get_in_project(pool, app.project_id, &app.name).await {
+            Ok(Some(app)) => app,
+            Ok(None) => {
+                eprintln!("watch: app {} was deleted before recreate", app.name);
+                return;
+            }
+            Err(e) => {
+                eprintln!("watch: failed to reload {} before recreate: {e}", app.name);
+                return;
+            }
+        };
         Self::mark_app_status(pool, app.project_id, &app.name, "crashed").await;
         let project = match Registry::get_project_by_id(pool, app.project_id).await {
             Ok(Some(project)) => project,
@@ -169,6 +181,19 @@ impl Scheduler {
             &process.process_name,
         );
         println!("watch: process {container_name} is missing, recreating");
+
+        sleep(Duration::from_millis(500)).await;
+        let process = match Registry::get_active_process(pool, process.id).await {
+            Ok(Some(process)) => process,
+            Ok(None) => {
+                eprintln!("watch: process {container_name} was deleted before recreate");
+                return;
+            }
+            Err(e) => {
+                eprintln!("watch: failed to reload process {container_name}: {e}");
+                return;
+            }
+        };
         let _ = Registry::update_process_status(pool, process.id, "crashed").await;
 
         let image = match process.image_id.as_deref().filter(|s| !s.is_empty()) {

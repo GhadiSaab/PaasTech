@@ -133,7 +133,8 @@ impl Scheduler {
                     Some(RemoveContainerOptionsBuilder::default().build()),
                 )
                 .await;
-            return Err(DeployError::Other(
+            let _ = Registry::update_process_status(pool, process_id, "running").await;
+            return Err(DeployError::RolledBack(
                 "health probe timed out after 15s; old process container left running".to_string(),
             ));
         }
@@ -304,7 +305,8 @@ impl Scheduler {
                     Some(RemoveContainerOptionsBuilder::default().build()),
                 )
                 .await;
-            return Err(DeployError::Other(
+            let _ = Registry::update_process_status(pool, process_id, "running").await;
+            return Err(DeployError::RolledBack(
                 "production health probe timed out after 15s; old process container left running"
                     .to_string(),
             ));
@@ -369,9 +371,12 @@ impl Scheduler {
                 .await;
 
             return match rollback {
-                Ok(()) => Err(DeployError::Other(format!(
-                    "Failed to update registry for {app_name}/{process_name}: {e}; rolled back to previous container"
-                ))),
+                Ok(()) => {
+                    let _ = Registry::update_process_status(pool, process_id, "running").await;
+                    Err(DeployError::RolledBack(format!(
+                        "Failed to update registry for {app_name}/{process_name}: {e}; rolled back to previous container"
+                    )))
+                }
                 Err(rollback_error) => Err(DeployError::Other(format!(
                     "Failed to update registry for {app_name}/{process_name}: {e}; rollback failed: {rollback_error}"
                 ))),
