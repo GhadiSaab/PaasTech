@@ -5,7 +5,7 @@ use uuid::Uuid;
 
 use crate::models::CreateProjectPayload;
 use crate::registry::{DEFAULT_PROJECT_NAME, Registry};
-use crate::scheduler::{Scheduler, app_container_name, app_process_container_name};
+use crate::scheduler::{Scheduler, app_process_container_name};
 
 #[utoipa::path(
     post,
@@ -114,19 +114,13 @@ pub async fn delete(
         let processes = Registry::list_processes(&pool, app.id)
             .await
             .map_err(error::ErrorInternalServerError)?;
-        if !processes.is_empty() {
-            for process in processes {
-                scheduler
-                    .stop(&app_process_container_name(
-                        project.id,
-                        &app.name,
-                        &process.name,
-                    ))
-                    .await;
-            }
-        } else {
+        for process in processes {
             scheduler
-                .stop(&app_container_name(project.id, &app.name))
+                .stop(&app_process_container_name(
+                    project.id,
+                    &app.name,
+                    &process.name,
+                ))
                 .await;
         }
     }

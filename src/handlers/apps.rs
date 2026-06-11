@@ -16,15 +16,7 @@ use crate::engine::{
 use crate::extractor::ProjectScope;
 use crate::handlers::resources::ensure_manifest_resource_attached;
 use crate::registry::Registry;
-use crate::scheduler::{Scheduler, app_container_name, app_process_container_name, find_free_port};
-
-#[derive(Deserialize, utoipa::ToSchema)]
-pub struct DeployBody {
-    pub name: String,
-    pub image: String,
-    pub port: Option<u16>,
-    pub base_domain: Option<String>,
-}
+use crate::scheduler::{Scheduler, app_process_container_name};
 
 #[derive(Deserialize)]
 pub struct LogsQuery {
@@ -46,6 +38,13 @@ fn app_name_from_request(req: &HttpRequest) -> String {
         .to_string()
 }
 
+fn process_name_from_request(req: &HttpRequest) -> String {
+    req.match_info()
+        .get("process_name")
+        .unwrap_or_default()
+        .to_string()
+}
+
 fn validate_app_name(name: &str) -> Result<(), String> {
     if name.trim().is_empty() {
         return Err("app name cannot be empty".to_string());
@@ -59,42 +58,19 @@ fn validate_app_name(name: &str) -> Result<(), String> {
     Ok(())
 }
 
-pub(super) async fn fetch_project_env_vars_db(
+async fn mark_processes_status(
     pool: &PgPool,
-    project_id: Uuid,
-) -> Result<HashMap<String, String>, sqlx::Error> {
-    let rows =
-        sqlx::query("SELECT key, value FROM project_env_vars WHERE project_id = $1 ORDER BY key")
-            .bind(project_id)
-            .fetch_all(pool)
-            .await?;
-
-    let mut env = HashMap::new();
-    for row in rows {
-        let key: String = row.try_get("key")?;
-        let value: String = row.try_get("value")?;
-        env.insert(key, value);
-    }
-    Ok(env)
-}
-
-pub(super) async fn merged_app_env_vars(
-    pool: &PgPool,
-    project_id: Uuid,
-    application_id: Uuid,
-) -> Result<Vec<String>, sqlx::Error> {
-    let mut env = fetch_project_env_vars_db(pool, project_id).await?;
-    for pair in Registry::get_app_env(pool, application_id).await? {
-        if let Some((key, value)) = pair.split_once('=') {
-            env.insert(key.to_string(), value.to_string());
+    processes: &[crate::registry::AppProcess],
+    process_status: &str,
+) {
+    for process in processes {
+        if let Err(e) = Registry::update_process_status(pool, process.id, process_status).await {
+            eprintln!(
+                "registry: failed to update process {} status to {process_status}: {e}",
+                process.name
+            );
         }
     }
-    let mut pairs: Vec<_> = env.into_iter().collect();
-    pairs.sort_by(|(left, _), (right, _)| left.cmp(right));
-    Ok(pairs
-        .into_iter()
-        .map(|(key, value)| format!("{key}={value}"))
-        .collect())
 }
 
 async fn handle_upload(
@@ -153,7 +129,7 @@ async fn handle_upload(
     match Registry::get_in_project(&pool, project_id, &name).await {
         Ok(Some(existing)) => {
             match Registry::list_processes(&pool, existing.id).await {
-                Ok(processes) if !processes.is_empty() => {
+                Ok(processes) => {
                     for process in processes {
                         scheduler
                             .stop(&app_process_container_name(
@@ -161,17 +137,6 @@ async fn handle_upload(
                                 &name,
                                 &process.name,
                             ))
-                            .await;
-                    }
-                }
-                Ok(_) => {
-                    if existing
-                        .container_id
-                        .as_deref()
-                        .is_some_and(|id| !id.is_empty())
-                    {
-                        scheduler
-                            .stop(&app_container_name(existing.project_id, &name))
                             .await;
                     }
                 }
@@ -196,19 +161,7 @@ async fn handle_upload(
         }
     }
 
-    let app = match Registry::upsert_in_project(
-        &pool,
-        project_id,
-        &name,
-        "",
-        "",
-        internal_port.map(|p| p as i32),
-        0,
-        "building",
-        None,
-    )
-    .await
-    {
+    let app = match Registry::save_in_project(&pool, project_id, &name, None).await {
         Ok(app) => app,
         Err(e) => {
             let _ = fs::remove_dir_all(&extracted_folder).await;
@@ -256,7 +209,7 @@ async fn handle_upload(
         .await
         {
             let _ = fs::remove_dir_all(&extracted_folder).await;
-            let _ = Registry::update_status(&pool, project_id, &name, "failed").await;
+            mark_processes_status(&pool, &process_rows, "failed").await;
             return Err(e);
         }
     }
@@ -268,24 +221,21 @@ async fn handle_upload(
     let name_panic = name.clone();
     let extracted_folder_panic = extracted_folder.clone();
     let handle = tokio::spawn(async move {
-        let mut failed = false;
-
         for (process, row) in processes.into_iter().zip(process_rows) {
             let image_name = format!("{}-{}", name_bg, process.name);
             let context = extracted_folder.join(&process.path);
-            let env_vars = match merged_app_env_vars(&pool_bg, project_id, row.application_id).await
-            {
-                Ok(env_vars) => env_vars,
-                Err(e) => {
-                    eprintln!(
-                        "registry: failed to load env vars for {} process {}: {e}",
-                        name_bg, process.name
-                    );
-                    let _ = Registry::update_process_status(&pool_bg, row.id, "failed").await;
-                    failed = true;
-                    break;
-                }
-            };
+            let env_vars =
+                match Registry::merged_process_env_vars(&pool_bg, project_id, row.id).await {
+                    Ok(env_vars) => env_vars,
+                    Err(e) => {
+                        eprintln!(
+                            "registry: failed to load env vars for {} process {}: {e}",
+                            name_bg, process.name
+                        );
+                        let _ = Registry::update_process_status(&pool_bg, row.id, "failed").await;
+                        break;
+                    }
+                };
 
             if let Err(e) = build_image_with_name(
                 &image_name,
@@ -300,7 +250,6 @@ async fn handle_upload(
                     name_bg, process.name
                 );
                 let _ = Registry::update_process_status(&pool_bg, row.id, "failed").await;
-                failed = true;
                 break;
             }
 
@@ -336,21 +285,22 @@ async fn handle_upload(
                         name_bg, process.name
                     );
                     let _ = Registry::update_process_status(&pool_bg, row.id, "failed").await;
-                    failed = true;
                     break;
                 }
             }
         }
 
         let _ = fs::remove_dir_all(&extracted_folder).await;
-        let deploy_status = if failed { "failed" } else { "running" };
-        let _ = Registry::update_status(&pool_bg, project_id, &name_bg, deploy_status).await;
     });
     tokio::spawn(async move {
         if let Err(e) = handle.await {
             eprintln!("deploy task panicked for {name_panic}: {e}");
             let _ = fs::remove_dir_all(&extracted_folder_panic).await;
-            let _ = Registry::update_status(&pool_panic, project_id, &name_panic, "failed").await;
+            if let Ok(Some(app)) =
+                Registry::get_in_project(&pool_panic, project_id, &name_panic).await
+            {
+                mark_processes_status(&pool_panic, &app.processes, "failed").await;
+            }
         }
     });
 
@@ -403,83 +353,6 @@ pub async fn list(scope: ProjectScope) -> impl Responder {
         Err(e) => {
             eprintln!("registry: list_apps failed: {e}");
             HttpResponse::InternalServerError().finish()
-        }
-    }
-}
-
-#[utoipa::path(
-    post,
-    path = "/app/deploy",
-    request_body = DeployBody,
-    responses(
-        (status = 200, description = "Application deployed"),
-        (status = 422, description = "Internal application port is required"),
-        (status = 500, description = "Internal server error"),
-    ),
-    tag = "apps"
-)]
-#[post("/deploy")]
-pub async fn deploy(
-    scope: ProjectScope,
-    scheduler: web::Data<Scheduler>,
-    body: web::Json<DeployBody>,
-) -> HttpResponse {
-    let existing_app =
-        match Registry::get_in_project(&scope.pool, scope.project.id, &body.name).await {
-            Ok(app) => app,
-            Err(e) => {
-                eprintln!("deploy: failed to look up {}: {e}", body.name);
-                return HttpResponse::InternalServerError().finish();
-            }
-        };
-    let env_vars = if let Some(app) = existing_app {
-        match merged_app_env_vars(&scope.pool, scope.project.id, app.id).await {
-            Ok(env) => env,
-            Err(e) => {
-                eprintln!("deploy: failed to load env vars for {}: {e}", body.name);
-                return HttpResponse::InternalServerError().finish();
-            }
-        }
-    } else {
-        match fetch_project_env_vars_db(&scope.pool, scope.project.id).await {
-            Ok(env) => env
-                .into_iter()
-                .map(|(key, value)| format!("{key}={value}"))
-                .collect(),
-            Err(e) => {
-                eprintln!(
-                    "deploy: failed to load project env vars for {}: {e}",
-                    body.name
-                );
-                return HttpResponse::InternalServerError().finish();
-            }
-        }
-    };
-    use crate::scheduler::DeployError;
-    match scheduler
-        .deploy(
-            &scope.pool,
-            scope.project.id,
-            &scope.project.network_name,
-            &body.name,
-            &body.image,
-            body.port,
-            env_vars,
-            body.base_domain.as_deref(),
-        )
-        .await
-    {
-        Ok(()) => HttpResponse::Ok().finish(),
-        Err(DeployError::PortRequired(message)) => {
-            HttpResponse::UnprocessableEntity().body(message)
-        }
-        Err(DeployError::RolledBack(message)) => {
-            eprintln!("deploy: rolled back {}: {message}", body.name);
-            HttpResponse::InternalServerError().body(message)
-        }
-        Err(DeployError::Other(message)) => {
-            eprintln!("deploy: failed to deploy {}: {message}", body.name);
-            HttpResponse::InternalServerError().body(message)
         }
     }
 }
@@ -616,19 +489,6 @@ pub async fn update(
     }
     let removed_processes: Vec<_> = existing_by_name.into_values().collect();
 
-    if let Err(e) = Registry::update_status(
-        &scope.pool,
-        scope.project.id,
-        &app_name,
-        crate::status::UPDATING,
-    )
-    .await
-    {
-        let _ = fs::remove_dir_all(&extracted_folder).await;
-        eprintln!("registry: failed to mark {app_name} updating: {e}");
-        return Ok(HttpResponse::InternalServerError().finish());
-    }
-
     for resource in &resources {
         if let Err(e) = ensure_manifest_resource_attached(
             &scope.pool,
@@ -642,13 +502,8 @@ pub async fn update(
         .await
         {
             let _ = fs::remove_dir_all(&extracted_folder).await;
-            let _ = Registry::update_status(
-                &scope.pool,
-                scope.project.id,
-                &app_name,
-                crate::status::FAILED,
-            )
-            .await;
+            let rows: Vec<_> = process_rows.iter().map(|(_, row, _)| row.clone()).collect();
+            mark_processes_status(&scope.pool, &rows, crate::status::FAILED).await;
             return Err(e);
         }
     }
@@ -669,19 +524,19 @@ pub async fn update(
         for (process, row, existed) in process_rows {
             let image_name = format!("{}-{}", app_name_bg, process.name);
             let context = extracted_folder.join(&process.path);
-            let env_vars = match merged_app_env_vars(&pool_bg, project_id, row.application_id).await
-            {
-                Ok(env_vars) => env_vars,
-                Err(e) => {
-                    eprintln!(
-                        "registry: failed to load env vars for {} process {}: {e}",
-                        app_name_bg, process.name
-                    );
-                    let _ = Registry::update_process_status(&pool_bg, row.id, "failed").await;
-                    failed = true;
-                    break;
-                }
-            };
+            let env_vars =
+                match Registry::merged_process_env_vars(&pool_bg, project_id, row.id).await {
+                    Ok(env_vars) => env_vars,
+                    Err(e) => {
+                        eprintln!(
+                            "registry: failed to load env vars for {} process {}: {e}",
+                            app_name_bg, process.name
+                        );
+                        let _ = Registry::update_process_status(&pool_bg, row.id, "failed").await;
+                        failed = true;
+                        break;
+                    }
+                };
 
             if let Err(e) = build_image_with_name(
                 &image_name,
@@ -812,24 +667,16 @@ pub async fn update(
         }
 
         let _ = fs::remove_dir_all(&extracted_folder).await;
-        let deploy_status = if failed {
-            crate::status::FAILED
-        } else {
-            crate::status::RUNNING
-        };
-        let _ = Registry::update_status(&pool_bg, project_id, &app_name_bg, deploy_status).await;
     });
     tokio::spawn(async move {
         if let Err(e) = handle.await {
             eprintln!("update task panicked for {app_name_panic}: {e}");
             let _ = fs::remove_dir_all(&extracted_folder_panic).await;
-            let _ = Registry::update_status(
-                &pool_panic,
-                project_id,
-                &app_name_panic,
-                crate::status::FAILED,
-            )
-            .await;
+            if let Ok(Some(app)) =
+                Registry::get_in_project(&pool_panic, project_id, &app_name_panic).await
+            {
+                mark_processes_status(&pool_panic, &app.processes, crate::status::FAILED).await;
+            }
         }
     });
 
@@ -862,40 +709,20 @@ pub async fn stop(
             return HttpResponse::InternalServerError().finish();
         }
     };
-    match Registry::list_processes(&scope.pool, app.id).await {
-        Ok(processes) if !processes.is_empty() => {
-            for process in processes {
-                scheduler
-                    .stop(&app_process_container_name(
-                        app.project_id,
-                        &app_name,
-                        &process.name,
-                    ))
-                    .await;
-                if let Err(e) =
-                    Registry::update_process_status(&scope.pool, process.id, "stopped").await
-                {
-                    eprintln!(
-                        "registry: failed to update process {} for {app_name}: {e}",
-                        process.name
-                    );
-                }
-            }
+    for process in app.processes {
+        scheduler
+            .stop(&app_process_container_name(
+                app.project_id,
+                &app_name,
+                &process.name,
+            ))
+            .await;
+        if let Err(e) = Registry::update_process_status(&scope.pool, process.id, "stopped").await {
+            eprintln!(
+                "registry: failed to update process {} for {app_name}: {e}",
+                process.name
+            );
         }
-        Ok(_) => {
-            scheduler
-                .stop(&app_container_name(app.project_id, &app_name))
-                .await
-        }
-        Err(e) => {
-            eprintln!("registry: failed to list processes for {app_name}: {e}");
-            return HttpResponse::InternalServerError().finish();
-        }
-    }
-
-    if let Err(e) = Registry::update_status(&scope.pool, app.project_id, &app_name, "stopped").await
-    {
-        eprintln!("registry: failed to update status for {app_name}: {e}");
     }
     HttpResponse::Ok().finish()
 }
@@ -927,13 +754,6 @@ pub async fn restart(
         }
     };
 
-    let processes = match Registry::list_processes(&scope.pool, app.id).await {
-        Ok(processes) => processes,
-        Err(e) => {
-            eprintln!("registry: failed to list processes for {app_name}: {e}");
-            return HttpResponse::InternalServerError().finish();
-        }
-    };
     let project = match Registry::get_project_by_id(&scope.pool, app.project_id).await {
         Ok(Some(project)) => project,
         Ok(None) => return HttpResponse::InternalServerError().body("project not found"),
@@ -943,137 +763,78 @@ pub async fn restart(
         }
     };
 
-    if !processes.is_empty() {
-        for process in processes {
-            let Some(image) = process.image_id.as_deref().filter(|s| !s.is_empty()) else {
-                return HttpResponse::BadRequest().json(json!({
-                    "error": format!("process '{}' has no image_id", process.name)
-                }));
-            };
-            let process_type = process.process_type.clone();
+    for process in app.processes {
+        let Some(image) = process.image_id.as_deref().filter(|s| !s.is_empty()) else {
+            return HttpResponse::BadRequest().json(json!({
+                "error": format!("process '{}' has no image_id", process.name)
+            }));
+        };
+        let process_type = process.process_type.clone();
 
-            scheduler
-                .stop(&app_process_container_name(
-                    app.project_id,
-                    &app_name,
-                    &process.name,
-                ))
-                .await;
+        scheduler
+            .stop(&app_process_container_name(
+                app.project_id,
+                &app_name,
+                &process.name,
+            ))
+            .await;
 
-            let env_vars = match merged_app_env_vars(&scope.pool, app.project_id, app.id).await {
-                Ok(env_vars) => env_vars,
-                Err(e) => {
-                    eprintln!("registry: failed to load env vars for {app_name}: {e}");
-                    return HttpResponse::InternalServerError().finish();
-                }
-            };
-
-            match scheduler
-                .start_process(
-                    app.project_id,
-                    &project.network_name,
-                    &app_name,
-                    &process.name,
-                    &process_type,
-                    image,
-                    process.internal_port.map(|p| p as u16),
-                    app.base_domain.as_deref(),
-                    process.public_host.as_deref(),
-                    env_vars,
-                )
-                .await
-            {
-                Ok(started) => {
-                    if let Err(e) = Registry::update_process_running(
-                        &scope.pool,
-                        process.id,
-                        image,
-                        &started.container_id,
-                        started.internal_port.map(|p| p as i32),
-                        started.host_port.map(|p| p as i32),
-                    )
-                    .await
-                    {
-                        eprintln!(
-                            "registry: failed to update process {} for {app_name}: {e}",
-                            process.name
-                        );
-                        return HttpResponse::InternalServerError().finish();
-                    }
-                }
-                Err(e) => {
-                    eprintln!(
-                        "docker: failed to restart process {} for {app_name}: {e}",
-                        process.name
-                    );
-                    let _ =
-                        Registry::update_process_status(&scope.pool, process.id, "failed").await;
-                    return HttpResponse::InternalServerError().body(e.to_string());
-                }
-            }
-        }
-
-        if let Err(e) =
-            Registry::update_status(&scope.pool, app.project_id, &app_name, "running").await
-        {
-            eprintln!("registry: failed to update status for {app_name}: {e}");
-        }
-
-        return HttpResponse::Ok().finish();
-    }
-
-    let image = match app.image_id.as_deref().filter(|s| !s.is_empty()) {
-        Some(img) => img.to_string(),
-        None => {
-            if let Err(e) =
-                Registry::update_status(&scope.pool, app.project_id, &app_name, "running").await
-            {
-                eprintln!("registry: failed to update status for {app_name}: {e}");
-            }
-            return HttpResponse::Ok().finish();
-        }
-    };
-
-    let internal_port = match app.internal_port {
-        Some(p) => p as u16,
-        None => {
-            return HttpResponse::BadRequest().json(json!({"error": "internal_port missing: cannot restart an app without a configured internal port"}));
-        }
-    };
-    let host_port = match app.port {
-        Some(p) => p as u16,
-        None => match find_free_port() {
-            Ok(p) => p,
-            Err(e) => {
-                eprintln!("docker: failed to find free port for {app_name}: {e}");
-                return HttpResponse::InternalServerError().finish();
-            }
-        },
-    };
-    let env_vars = match merged_app_env_vars(&scope.pool, app.project_id, app.id).await {
-        Ok(env_vars) => env_vars,
-        Err(e) => {
-            eprintln!("registry: failed to merge env vars for {app_name}: {e}");
-            return HttpResponse::InternalServerError().finish();
-        }
-    };
-
-    if let Err(e) = scheduler
-        .redeploy(
+        let env_vars = match Registry::merged_process_env_vars(
             &scope.pool,
             app.project_id,
-            &project.network_name,
-            &app_name,
-            &image,
-            internal_port,
-            host_port,
-            env_vars,
-            app.base_domain.as_deref(),
+            process.id,
         )
         .await
-    {
-        eprintln!("docker: failed to restart {app_name}: {e}");
-        return HttpResponse::InternalServerError().body(e.to_string());
+        {
+            Ok(env_vars) => env_vars,
+            Err(e) => {
+                eprintln!("registry: failed to load env vars for {app_name}: {e}");
+                return HttpResponse::InternalServerError().finish();
+            }
+        };
+
+        match scheduler
+            .start_process(
+                app.project_id,
+                &project.network_name,
+                &app_name,
+                &process.name,
+                &process_type,
+                image,
+                process.internal_port.map(|p| p as u16),
+                app.base_domain.as_deref(),
+                process.public_host.as_deref(),
+                env_vars,
+            )
+            .await
+        {
+            Ok(started) => {
+                if let Err(e) = Registry::update_process_running(
+                    &scope.pool,
+                    process.id,
+                    image,
+                    &started.container_id,
+                    started.internal_port.map(|p| p as i32),
+                    started.host_port.map(|p| p as i32),
+                )
+                .await
+                {
+                    eprintln!(
+                        "registry: failed to update process {} for {app_name}: {e}",
+                        process.name
+                    );
+                    return HttpResponse::InternalServerError().finish();
+                }
+            }
+            Err(e) => {
+                eprintln!(
+                    "docker: failed to restart process {} for {app_name}: {e}",
+                    process.name
+                );
+                let _ = Registry::update_process_status(&scope.pool, process.id, "failed").await;
+                return HttpResponse::InternalServerError().body(e.to_string());
+            }
+        }
     }
     HttpResponse::Ok().finish()
 }
@@ -1092,7 +853,7 @@ pub async fn restart(
 #[get("/{app_name}/status")]
 pub async fn status(
     scope: ProjectScope,
-    scheduler: web::Data<Scheduler>,
+    _scheduler: web::Data<Scheduler>,
     req: HttpRequest,
 ) -> impl Responder {
     let app_name = app_name_from_request(&req);
@@ -1105,49 +866,7 @@ pub async fn status(
         }
     };
 
-    let processes = match Registry::list_processes(&scope.pool, app.id).await {
-        Ok(p) => p,
-        Err(e) => {
-            eprintln!("registry: list_processes failed for {app_name}: {e}");
-            return HttpResponse::InternalServerError().finish();
-        }
-    };
-
-    let docker_status = if processes.is_empty() {
-        scheduler
-            .inspect(&app_container_name(app.project_id, &app_name))
-            .await
-    } else {
-        // For multi-process apps, report the worst status across all process containers.
-        let mut worst = "running".to_string();
-        for process in &processes {
-            let s = scheduler
-                .inspect(&app_process_container_name(
-                    app.project_id,
-                    &app_name,
-                    &process.name,
-                ))
-                .await;
-            if s == "exited" || s == "unknown" {
-                worst = s;
-                break;
-            } else if s != "running" {
-                worst = s;
-            }
-        }
-        worst
-    };
-
-    let db_status = app.status.as_deref().unwrap_or(crate::status::UNKNOWN);
-    let status = match db_status {
-        // FAILED and UPDATING must win over Docker state: a rolling update
-        // leaves the old container running, so Docker always reports "running"
-        // even when the update failed or is still in progress.
-        s if s == crate::status::FAILED || s == crate::status::UPDATING => db_status.to_string(),
-        _ if docker_status == crate::status::UNKNOWN => db_status.to_string(),
-        _ => docker_status,
-    };
-    HttpResponse::Ok().body(status)
+    HttpResponse::Ok().body(app.status)
 }
 
 #[utoipa::path(
@@ -1177,17 +896,11 @@ pub async fn delete(
         }
     };
 
-    let containers = match Registry::list_processes(&scope.pool, app.id).await {
-        Ok(processes) if !processes.is_empty() => processes
-            .into_iter()
-            .map(|process| app_process_container_name(app.project_id, &app_name, &process.name))
-            .collect::<Vec<_>>(),
-        Ok(_) => vec![app_container_name(app.project_id, &app_name)],
-        Err(e) => {
-            eprintln!("registry: failed to list processes for {app_name}: {e}");
-            return HttpResponse::InternalServerError().finish();
-        }
-    };
+    let containers: Vec<_> = app
+        .processes
+        .iter()
+        .map(|process| app_process_container_name(app.project_id, &app_name, &process.name))
+        .collect();
 
     let mut tx = match scope.pool.begin().await {
         Ok(tx) => tx,
@@ -1259,31 +972,23 @@ pub async fn logs(
         }
     };
 
-    let container_name = match Registry::list_processes(&scope.pool, app.id).await {
-        Ok(processes) if !processes.is_empty() => {
-            let selected_name = match query.process.as_deref() {
-                Some(name) => processes
-                    .iter()
-                    .find(|process| process.name == name)
-                    .map(|process| process.name.clone()),
-                None => processes
-                    .iter()
-                    .find(|process| process.process_type == ProcessType::Web)
-                    .or_else(|| processes.first())
-                    .map(|process| process.name.clone()),
-            };
-
-            let Some(process_name) = selected_name else {
-                return HttpResponse::NotFound().body("process not found");
-            };
-            app_process_container_name(app.project_id, &app_name, &process_name)
-        }
-        Ok(_) => app_container_name(app.project_id, &app_name),
-        Err(e) => {
-            eprintln!("registry: failed to list processes for {app_name}: {e}");
-            return HttpResponse::InternalServerError().finish();
-        }
+    let selected_name = match query.process.as_deref() {
+        Some(name) => app
+            .processes
+            .iter()
+            .find(|process| process.name == name)
+            .map(|process| process.name.clone()),
+        None => app
+            .processes
+            .iter()
+            .find(|process| process.process_type == ProcessType::Web)
+            .or_else(|| app.processes.first())
+            .map(|process| process.name.clone()),
     };
+    let Some(process_name) = selected_name else {
+        return HttpResponse::NotFound().body("process not found");
+    };
+    let container_name = app_process_container_name(app.project_id, &app_name, &process_name);
 
     if query.follow.unwrap_or(false) {
         let stream = scheduler
@@ -1308,18 +1013,22 @@ pub async fn logs(
 
 #[utoipa::path(
     get,
-    path = "/app/{app_name}/env",
-    params(("app_name" = String, Path, description = "Application name")),
+    path = "/app/{app_name}/process/{process_name}/env",
+    params(
+        ("app_name" = String, Path, description = "Application name"),
+        ("process_name" = String, Path, description = "Process name")
+    ),
     responses(
         (status = 200, description = "Environment variables as key-value map"),
-        (status = 404, description = "Application not found"),
+        (status = 404, description = "Application or process not found"),
         (status = 500, description = "Internal server error"),
     ),
     tag = "apps"
 )]
-#[get("/{app_name}/env")]
+#[get("/{app_name}/process/{process_name}/env")]
 pub async fn get_env(scope: ProjectScope, req: HttpRequest) -> impl Responder {
     let app_name = app_name_from_request(&req);
+    let process_name = process_name_from_request(&req);
     let app = match Registry::get_in_project(&scope.pool, scope.project.id, &app_name).await {
         Ok(Some(app)) => app,
         Ok(None) => return HttpResponse::NotFound().finish(),
@@ -1328,29 +1037,59 @@ pub async fn get_env(scope: ProjectScope, req: HttpRequest) -> impl Responder {
             return HttpResponse::InternalServerError().finish();
         }
     };
+    let process = match Registry::get_process_by_name(&scope.pool, app.id, &process_name).await {
+        Ok(Some(process)) => process,
+        Ok(None) => return HttpResponse::NotFound().finish(),
+        Err(e) => {
+            eprintln!("registry: get process failed for {app_name}/{process_name}: {e}");
+            return HttpResponse::InternalServerError().finish();
+        }
+    };
 
-    let rows = match sqlx::query!(
-        "SELECT key, value FROM application_env_vars WHERE application_id = $1 ORDER BY key",
-        app.id,
+    let rows = match sqlx::query(
+        "SELECT key, value FROM process_env_vars WHERE process_id = $1 ORDER BY key",
     )
+    .bind(process.id)
     .fetch_all(scope.pool.get_ref())
     .await
     {
         Ok(rows) => rows,
         Err(e) => {
-            eprintln!("registry: failed to fetch env vars for {app_name}: {e}");
+            eprintln!("registry: failed to fetch env vars for {app_name}/{process_name}: {e}");
             return HttpResponse::InternalServerError().finish();
         }
     };
 
-    let env_map: HashMap<String, String> = rows.into_iter().map(|r| (r.key, r.value)).collect();
+    let mut env_map = HashMap::new();
+    for row in rows {
+        let key: String = match row.try_get("key") {
+            Ok(key) => key,
+            Err(e) => {
+                eprintln!("registry: failed to decode env key for {app_name}/{process_name}: {e}");
+                return HttpResponse::InternalServerError().finish();
+            }
+        };
+        let value: String = match row.try_get("value") {
+            Ok(value) => value,
+            Err(e) => {
+                eprintln!(
+                    "registry: failed to decode env value for {app_name}/{process_name}: {e}"
+                );
+                return HttpResponse::InternalServerError().finish();
+            }
+        };
+        env_map.insert(key, value);
+    }
     HttpResponse::Ok().json(env_map)
 }
 
 #[utoipa::path(
     post,
-    path = "/app/{app_name}/env",
-    params(("app_name" = String, Path, description = "Application name")),
+    path = "/app/{app_name}/process/{process_name}/env",
+    params(
+        ("app_name" = String, Path, description = "Application name"),
+        ("process_name" = String, Path, description = "Process name")
+    ),
     request_body(
         content_type = "application/json",
         description = "Single environment variable to set or update: {\"key\": \"K\", \"value\": \"V\"}"
@@ -1362,13 +1101,14 @@ pub async fn get_env(scope: ProjectScope, req: HttpRequest) -> impl Responder {
     ),
     tag = "apps"
 )]
-#[post("/{app_name}/env")]
+#[post("/{app_name}/process/{process_name}/env")]
 pub async fn set_env(
     scope: ProjectScope,
     req: HttpRequest,
     payload: web::Json<EnvSetPayload>,
 ) -> impl Responder {
     let app_name = app_name_from_request(&req);
+    let process_name = process_name_from_request(&req);
     let app = match Registry::get_in_project(&scope.pool, scope.project.id, &app_name).await {
         Ok(Some(app)) => app,
         Ok(None) => return HttpResponse::NotFound().finish(),
@@ -1377,21 +1117,29 @@ pub async fn set_env(
             return HttpResponse::InternalServerError().finish();
         }
     };
+    let process = match Registry::get_process_by_name(&scope.pool, app.id, &process_name).await {
+        Ok(Some(process)) => process,
+        Ok(None) => return HttpResponse::NotFound().finish(),
+        Err(e) => {
+            eprintln!("registry: get process failed for {app_name}/{process_name}: {e}");
+            return HttpResponse::InternalServerError().finish();
+        }
+    };
 
-    let result = sqlx::query!(
-        "INSERT INTO application_env_vars (application_id, key, value) VALUES ($1, $2, $3) \
-         ON CONFLICT (application_id, key) DO UPDATE SET value = EXCLUDED.value",
-        app.id,
-        payload.key,
-        payload.value,
+    let result = sqlx::query(
+        "INSERT INTO process_env_vars (process_id, key, value) VALUES ($1, $2, $3) \
+         ON CONFLICT (process_id, key) DO UPDATE SET value = EXCLUDED.value",
     )
+    .bind(process.id)
+    .bind(&payload.key)
+    .bind(&payload.value)
     .execute(scope.pool.get_ref())
     .await;
 
     match result {
         Ok(_) => HttpResponse::Ok().finish(),
         Err(e) => {
-            eprintln!("registry: failed to set env var for {app_name}: {e}");
+            eprintln!("registry: failed to set env var for {app_name}/{process_name}: {e}");
             HttpResponse::InternalServerError().finish()
         }
     }
@@ -1399,8 +1147,11 @@ pub async fn set_env(
 
 #[utoipa::path(
     put,
-    path = "/app/{app_name}/env",
-    params(("app_name" = String, Path, description = "Application name")),
+    path = "/app/{app_name}/process/{process_name}/env",
+    params(
+        ("app_name" = String, Path, description = "Application name"),
+        ("process_name" = String, Path, description = "Process name")
+    ),
     request_body(
         content_type = "application/json",
         description = "Environment variables as key-value map (replaces all existing variables)"
@@ -1412,18 +1163,27 @@ pub async fn set_env(
     ),
     tag = "apps"
 )]
-#[put("/{app_name}/env")]
+#[put("/{app_name}/process/{process_name}/env")]
 pub async fn update_env(
     scope: ProjectScope,
     req: HttpRequest,
     payload: web::Json<HashMap<String, String>>,
 ) -> impl Responder {
     let app_name = app_name_from_request(&req);
+    let process_name = process_name_from_request(&req);
     let app = match Registry::get_in_project(&scope.pool, scope.project.id, &app_name).await {
         Ok(Some(app)) => app,
         Ok(None) => return HttpResponse::NotFound().finish(),
         Err(e) => {
             eprintln!("registry: get failed for {app_name}: {e}");
+            return HttpResponse::InternalServerError().finish();
+        }
+    };
+    let process = match Registry::get_process_by_name(&scope.pool, app.id, &process_name).await {
+        Ok(Some(process)) => process,
+        Ok(None) => return HttpResponse::NotFound().finish(),
+        Err(e) => {
+            eprintln!("registry: get process failed for {app_name}/{process_name}: {e}");
             return HttpResponse::InternalServerError().finish();
         }
     };
@@ -1436,34 +1196,31 @@ pub async fn update_env(
         }
     };
 
-    if let Err(e) = sqlx::query!(
-        "DELETE FROM application_env_vars WHERE application_id = $1",
-        app.id,
-    )
-    .execute(&mut *tx)
-    .await
+    if let Err(e) = sqlx::query("DELETE FROM process_env_vars WHERE process_id = $1")
+        .bind(process.id)
+        .execute(&mut *tx)
+        .await
     {
-        eprintln!("registry: failed to delete env vars for {app_name}: {e}");
+        eprintln!("registry: failed to delete env vars for {app_name}/{process_name}: {e}");
         return HttpResponse::InternalServerError().finish();
     }
 
     for (key, value) in payload.iter() {
-        if let Err(e) = sqlx::query!(
-            "INSERT INTO application_env_vars (application_id, key, value) VALUES ($1, $2, $3)",
-            app.id,
-            key,
-            value,
-        )
-        .execute(&mut *tx)
-        .await
+        if let Err(e) =
+            sqlx::query("INSERT INTO process_env_vars (process_id, key, value) VALUES ($1, $2, $3)")
+                .bind(process.id)
+                .bind(key)
+                .bind(value)
+                .execute(&mut *tx)
+                .await
         {
-            eprintln!("registry: failed to insert env var for {app_name}: {e}");
+            eprintln!("registry: failed to insert env var for {app_name}/{process_name}: {e}");
             return HttpResponse::InternalServerError().finish();
         }
     }
 
     if let Err(e) = tx.commit().await {
-        eprintln!("registry: failed to commit env vars for {app_name}: {e}");
+        eprintln!("registry: failed to commit env vars for {app_name}/{process_name}: {e}");
         return HttpResponse::InternalServerError().finish();
     }
 

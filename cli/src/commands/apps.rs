@@ -14,12 +14,18 @@ use zip::write::SimpleFileOptions;
 #[derive(Deserialize)]
 struct App {
     name: String,
-    image_id: Option<String>,
-    port: Option<i32>,
-    status: Option<String>,
+    status: String,
+    processes: Vec<AppProcess>,
     #[allow(dead_code)]
     env: Option<Value>,
     created_at: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct AppProcess {
+    name: String,
+    image_id: Option<String>,
+    host_port: Option<i32>,
 }
 
 #[derive(Deserialize)]
@@ -36,19 +42,29 @@ fn print_table(apps: &[App]) {
     let col_name = apps.iter().map(|a| a.name.len()).max().unwrap_or(4).max(4);
     let col_image = apps
         .iter()
-        .map(|a| a.image_id.as_deref().unwrap_or("-").len())
+        .map(|a| {
+            primary_process(a)
+                .and_then(|p| p.image_id.as_deref())
+                .unwrap_or("-")
+                .len()
+        })
         .max()
         .unwrap_or(5)
         .max(5);
     let col_port = apps
         .iter()
-        .map(|a| a.port.map(|p| p.to_string().len()).unwrap_or(1))
+        .map(|a| {
+            primary_process(a)
+                .and_then(|p| p.host_port)
+                .map(|p| p.to_string().len())
+                .unwrap_or(1)
+        })
         .max()
         .unwrap_or(4)
         .max(4);
     let col_status = apps
         .iter()
-        .map(|a| a.status.as_deref().unwrap_or("unknown").len())
+        .map(|a| a.status.len())
         .max()
         .unwrap_or(6)
         .max(6);
@@ -80,11 +96,14 @@ fn print_table(apps: &[App]) {
     println!("{}", sep);
 
     for a in apps {
-        let image = a.image_id.as_deref().unwrap_or("-");
-        let port = a.port.map(|p| p.to_string()).unwrap_or_else(|| "-".into());
+        let primary = primary_process(a);
+        let image = primary.and_then(|p| p.image_id.as_deref()).unwrap_or("-");
+        let port = primary
+            .and_then(|p| p.host_port)
+            .map(|p| p.to_string())
+            .unwrap_or_else(|| "-".into());
         let created = a.created_at.as_deref().unwrap_or("-");
-        let raw_status = a.status.as_deref().unwrap_or("unknown");
-        let (status_colored, status_len) = colored_status(raw_status);
+        let (status_colored, status_len) = colored_status(&a.status);
         let status_pad = col_status.saturating_sub(status_len);
 
         println!(
@@ -105,38 +124,11 @@ fn print_table(apps: &[App]) {
     println!("{}", sep);
 }
 
-// POST /app/deploy — exists
-pub async fn deploy(name: &str, image: &str, port: u16) -> Result<(), String> {
-    let pb = spinner(&format!("Deploying {} ({})", name, image));
-
-    let client = http_client();
-    let body = serde_json::json!({
-        "name": name,
-        "image": image,
-        "port": port
-    });
-
-    let project = require_project()?;
-    let url = format!("{}/project/{}/app/deploy", api_base(), project);
-
-    let resp = client
-        .post(url)
-        .json(&body)
-        .send()
-        .await
-        .map_err(|e| format!("Request failed: {e}"))?;
-
-    pb.finish_and_clear();
-
-    if resp.status().is_success() {
-        println!("{} App {} deployed", "✓".green(), name.bold());
-    } else {
-        let status = resp.status();
-        let text = resp.text().await.unwrap_or_default();
-        return Err(format!("Deploy failed ({}): {}", status, text));
-    }
-
-    Ok(())
+fn primary_process(app: &App) -> Option<&AppProcess> {
+    app.processes
+        .iter()
+        .find(|process| process.name == "web")
+        .or_else(|| app.processes.first())
 }
 
 // GET /app — exists
@@ -635,14 +627,29 @@ fn should_skip(root: &Path, path: &Path) -> bool {
         })
 }
 
-// POST /app/{name}/env
-pub async fn env_set(name: &str, pair: &str) -> Result<(), String> {
+fn process_env_url(name: &str, process: &str) -> Result<reqwest::Url, String> {
+    let mut url = reqwest::Url::parse(&api_base()).map_err(|e| format!("Invalid API URL: {e}"))?;
+    {
+        let mut segments = url
+            .path_segments_mut()
+            .map_err(|_| "API URL cannot be a base".to_string())?;
+        if let Some(project) = current_project()? {
+            segments.extend(&["project", &project, "app", name, "process", process, "env"]);
+        } else {
+            segments.extend(&["app", name, "process", process, "env"]);
+        }
+    }
+    Ok(url)
+}
+
+// POST /app/{name}/process/{process}/env
+pub async fn env_set(name: &str, process: &str, pair: &str) -> Result<(), String> {
     let (key, value) = pair
         .split_once('=')
         .ok_or_else(|| "Invalid format: expected KEY=VALUE".to_string())?;
 
-    let url = app_url(name, "env")?;
-    let pb = spinner(&format!("Setting env for {}...", name));
+    let url = process_env_url(name, process)?;
+    let pb = spinner(&format!("Setting env for {}/{}...", name, process));
     let client = http_client();
     let body = serde_json::json!({ "key": key, "value": value });
 
@@ -656,7 +663,7 @@ pub async fn env_set(name: &str, pair: &str) -> Result<(), String> {
 
     match resp.status().as_u16() {
         200 | 201 | 204 => println!("{} {}={}", "✓".green(), key.bold(), value),
-        404 => return Err(format!("App '{}' not found", name)),
+        404 => return Err(format!("App '{}' or process '{}' not found", name, process)),
         code => {
             let text = resp.text().await.unwrap_or_default();
             return Err(format!("Server error ({}): {}", code, text));
@@ -666,9 +673,9 @@ pub async fn env_set(name: &str, pair: &str) -> Result<(), String> {
     Ok(())
 }
 
-// GET /app/{name}/env
-pub async fn env_list(name: &str) -> Result<(), String> {
-    let url = app_url(name, "env")?;
+// GET /app/{name}/process/{process}/env
+pub async fn env_list(name: &str, process: &str) -> Result<(), String> {
+    let url = process_env_url(name, process)?;
     let resp = reqwest::get(url)
         .await
         .map_err(|e| format!("Request failed: {e}"))?;
@@ -691,7 +698,7 @@ pub async fn env_list(name: &str) -> Result<(), String> {
                 }
             }
         }
-        404 => return Err(format!("App '{}' not found", name)),
+        404 => return Err(format!("App '{}' or process '{}' not found", name, process)),
         code => return Err(format!("Server error: {}", code)),
     }
 

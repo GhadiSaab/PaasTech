@@ -21,11 +21,31 @@ async fn build_pool() -> web::Data<PgPool> {
     dotenvy::dotenv().ok();
     let url = std::env::var("DATABASE_URL")
         .unwrap_or_else(|_| "postgres://paastech:paastech@localhost:5433/paastech".to_string());
-    web::Data::new(
-        PgPool::connect(&url)
-            .await
-            .expect("Failed to connect to test DB"),
+    let pool = PgPool::connect(&url)
+        .await
+        .expect("Failed to connect to test DB");
+    sqlx::query("SELECT pg_advisory_lock(747070)")
+        .execute(&pool)
+        .await
+        .expect("Failed to lock test schema setup");
+    sqlx::query(
+        r#"
+        CREATE TABLE IF NOT EXISTS process_env_vars (
+            process_id UUID NOT NULL REFERENCES application_processes(id) ON DELETE CASCADE,
+            key VARCHAR(255) NOT NULL,
+            value TEXT NOT NULL,
+            PRIMARY KEY (process_id, key)
+        )
+        "#,
     )
+    .execute(&pool)
+    .await
+    .expect("Failed to prepare test process_env_vars table");
+    sqlx::query("SELECT pg_advisory_unlock(747070)")
+        .execute(&pool)
+        .await
+        .expect("Failed to unlock test schema setup");
+    web::Data::new(pool)
 }
 
 async fn cleanup_app(pool: &PgPool, name: &str) {
@@ -34,6 +54,27 @@ async fn cleanup_app(pool: &PgPool, name: &str) {
         .execute(pool)
         .await
         .ok();
+}
+
+async fn insert_test_app_process(pool: &PgPool, name: &str, status: &str) -> Uuid {
+    cleanup_app(pool, name).await;
+    let app = Registry::save_in_project(pool, crate::registry::DEFAULT_PROJECT_ID, name, None)
+        .await
+        .expect("Failed to insert test app");
+    let process = Registry::create_process(
+        pool,
+        app.id,
+        "web",
+        "web",
+        ".",
+        None,
+        json!({}),
+        Some(8080),
+        status,
+    )
+    .await
+    .expect("Failed to insert test process");
+    process.id
 }
 
 async fn cleanup_resource_by_display_name(pool: &PgPool, display_name: &str) {
@@ -103,59 +144,12 @@ async fn test_list_apps() {
 }
 
 #[actix_web::test]
-async fn test_deploy_app() {
-    let scheduler = build_scheduler();
-    let pool = build_pool().await;
-    let app_name = "test-deploy-app";
-
-    cleanup_app(pool.get_ref(), app_name).await;
-
-    let app = test::init_service(
-        App::new()
-            .app_data(scheduler.clone())
-            .app_data(pool.clone())
-            .service(
-                web::scope("/app")
-                    .service(handlers::apps::deploy)
-                    .service(handlers::apps::stop),
-            ),
-    )
-    .await;
-
-    let req = test::TestRequest::post()
-        .uri("/app/deploy")
-        .set_json(json!({"name": app_name, "image": "hello-world", "port": 8080}))
-        .to_request();
-    let resp = test::call_service(&app, req).await;
-    assert_eq!(resp.status(), 200);
-
-    let req = test::TestRequest::post()
-        .uri(&format!("/app/{}/stop", app_name))
-        .to_request();
-    test::call_service(&app, req).await;
-
-    cleanup_app(pool.get_ref(), app_name).await;
-}
-
-#[actix_web::test]
 async fn test_stop_app() {
     let scheduler = build_scheduler();
     let pool = build_pool().await;
     let app_name = "test-stop-app";
 
-    cleanup_app(pool.get_ref(), app_name).await;
-    Registry::save(
-        pool.get_ref(),
-        app_name,
-        "",
-        "",
-        None,
-        9001,
-        "running",
-        None,
-    )
-    .await
-    .unwrap();
+    insert_test_app_process(pool.get_ref(), app_name, "running").await;
 
     let app = test::init_service(
         App::new()
@@ -200,20 +194,7 @@ async fn test_restart_app() {
     let pool = build_pool().await;
     let app_name = "test-restart-app";
 
-    cleanup_app(pool.get_ref(), app_name).await;
-    // image_id vide → redeploy prend le chemin "pas de Docker"
-    Registry::save(
-        pool.get_ref(),
-        app_name,
-        "",
-        "",
-        None,
-        9002,
-        "running",
-        None,
-    )
-    .await
-    .unwrap();
+    insert_test_app_process(pool.get_ref(), app_name, "running").await;
 
     let app = test::init_service(
         App::new()
@@ -227,7 +208,7 @@ async fn test_restart_app() {
         .uri(&format!("/app/{}/restart", app_name))
         .to_request();
     let resp = test::call_service(&app, req).await;
-    assert_eq!(resp.status(), 200);
+    assert_eq!(resp.status(), 400);
 
     cleanup_app(pool.get_ref(), app_name).await;
 }
@@ -258,19 +239,7 @@ async fn test_status_app() {
     let pool = build_pool().await;
     let app_name = "test-status-app";
 
-    cleanup_app(pool.get_ref(), app_name).await;
-    Registry::save(
-        pool.get_ref(),
-        app_name,
-        "",
-        "",
-        None,
-        9003,
-        "running",
-        None,
-    )
-    .await
-    .unwrap();
+    insert_test_app_process(pool.get_ref(), app_name, "running").await;
 
     let app = test::init_service(
         App::new()
@@ -288,24 +257,46 @@ async fn test_status_app() {
 
     let body = test::read_body(resp).await;
     let status_str = String::from_utf8(body.to_vec()).unwrap();
-    assert!(!status_str.is_empty());
+    assert_eq!(status_str, "running");
 
     cleanup_app(pool.get_ref(), app_name).await;
 }
 
 #[actix_web::test]
-async fn test_status_app_failed_beats_docker_running() {
-    // Regression: status endpoint returned Docker state ("running") even when
-    // DB status was "failed". During a rolling update, the old container stays
-    // running, so Docker always reports "running" — the DB status must win.
+async fn test_status_app_crashed_is_derived_from_process() {
+    let scheduler = build_scheduler();
+    let pool = build_pool().await;
+    let app_name = "test-status-crashed-app";
+
+    insert_test_app_process(pool.get_ref(), app_name, "crashed").await;
+
+    let app = test::init_service(
+        App::new()
+            .app_data(scheduler.clone())
+            .app_data(pool.clone())
+            .service(web::scope("/app").service(handlers::apps::status)),
+    )
+    .await;
+
+    let req = test::TestRequest::get()
+        .uri(&format!("/app/{}/status", app_name))
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(resp.status(), 200);
+    let body = test::read_body(resp).await;
+    let status_str = String::from_utf8(body.to_vec()).unwrap();
+    assert_eq!(status_str, "crashed");
+
+    cleanup_app(pool.get_ref(), app_name).await;
+}
+
+#[actix_web::test]
+async fn test_status_app_failed_is_derived_from_process() {
     let scheduler = build_scheduler();
     let pool = build_pool().await;
     let app_name = "test-status-failed-app";
 
-    cleanup_app(pool.get_ref(), app_name).await;
-    Registry::save(pool.get_ref(), app_name, "", "", None, 9004, "failed", None)
-        .await
-        .unwrap();
+    insert_test_app_process(pool.get_ref(), app_name, "failed").await;
 
     let app = test::init_service(
         App::new()
@@ -322,36 +313,18 @@ async fn test_status_app_failed_beats_docker_running() {
     assert_eq!(resp.status(), 200);
     let body = test::read_body(resp).await;
     let status_str = String::from_utf8(body.to_vec()).unwrap();
-    assert_eq!(
-        status_str, "failed",
-        "status endpoint must return DB 'failed' even when no container exists (Docker returns 'unknown')"
-    );
+    assert_eq!(status_str, "failed");
 
     cleanup_app(pool.get_ref(), app_name).await;
 }
 
 #[actix_web::test]
-async fn test_status_app_updating_beats_docker_running() {
-    // Rolling updates keep the old container running (Docker = "running"), but
-    // the DB is "updating". The status endpoint must return "updating" so that
-    // wait_until_running keeps polling instead of declaring false success.
+async fn test_status_app_building_is_derived_from_process() {
     let scheduler = build_scheduler();
     let pool = build_pool().await;
-    let app_name = "test-status-updating-app";
+    let app_name = "test-status-building-app";
 
-    cleanup_app(pool.get_ref(), app_name).await;
-    Registry::save(
-        pool.get_ref(),
-        app_name,
-        "",
-        "",
-        None,
-        9005,
-        "updating",
-        None,
-    )
-    .await
-    .unwrap();
+    insert_test_app_process(pool.get_ref(), app_name, "building").await;
 
     let app = test::init_service(
         App::new()
@@ -368,7 +341,7 @@ async fn test_status_app_updating_beats_docker_running() {
     assert_eq!(resp.status(), 200);
     let body = test::read_body(resp).await;
     let status_str = String::from_utf8(body.to_vec()).unwrap();
-    assert_eq!(status_str, "updating");
+    assert_eq!(status_str, "building");
 
     cleanup_app(pool.get_ref(), app_name).await;
 }
@@ -736,19 +709,7 @@ async fn test_delete_app() {
     let pool = build_pool().await;
     let app_name = "test-delete-app";
 
-    cleanup_app(pool.get_ref(), app_name).await;
-    Registry::save(
-        pool.get_ref(),
-        app_name,
-        "",
-        "",
-        None,
-        9010,
-        "stopped",
-        None,
-    )
-    .await
-    .unwrap();
+    insert_test_app_process(pool.get_ref(), app_name, "stopped").await;
 
     let app = test::init_service(
         App::new()
@@ -799,7 +760,7 @@ async fn test_get_app_env_not_found() {
     .await;
 
     let req = test::TestRequest::get()
-        .uri("/app/nonexistent-app-xyz/env")
+        .uri("/app/nonexistent-app-xyz/process/web/env")
         .to_request();
     let resp = test::call_service(&app, req).await;
     assert_eq!(resp.status(), 404);
@@ -810,19 +771,7 @@ async fn test_get_app_env() {
     let pool = build_pool().await;
     let app_name = "test-get-app-env";
 
-    cleanup_app(pool.get_ref(), app_name).await;
-    Registry::save(
-        pool.get_ref(),
-        app_name,
-        "",
-        "",
-        None,
-        9011,
-        "running",
-        None,
-    )
-    .await
-    .unwrap();
+    insert_test_app_process(pool.get_ref(), app_name, "running").await;
 
     let app = test::init_service(
         App::new()
@@ -832,7 +781,7 @@ async fn test_get_app_env() {
     .await;
 
     let req = test::TestRequest::get()
-        .uri(&format!("/app/{}/env", app_name))
+        .uri(&format!("/app/{}/process/web/env", app_name))
         .to_request();
     let resp = test::call_service(&app, req).await;
     assert_eq!(resp.status(), 200);
@@ -855,7 +804,7 @@ async fn test_update_app_env_not_found() {
     .await;
 
     let req = test::TestRequest::put()
-        .uri("/app/nonexistent-app-xyz/env")
+        .uri("/app/nonexistent-app-xyz/process/web/env")
         .set_json(json!({"MY_VAR": "value"}))
         .to_request();
     let resp = test::call_service(&app, req).await;
@@ -867,19 +816,7 @@ async fn test_update_and_get_app_env() {
     let pool = build_pool().await;
     let app_name = "test-update-app-env";
 
-    cleanup_app(pool.get_ref(), app_name).await;
-    Registry::save(
-        pool.get_ref(),
-        app_name,
-        "",
-        "",
-        None,
-        9012,
-        "running",
-        None,
-    )
-    .await
-    .unwrap();
+    insert_test_app_process(pool.get_ref(), app_name, "running").await;
 
     let app = test::init_service(
         App::new().app_data(pool.clone()).service(
@@ -891,14 +828,14 @@ async fn test_update_and_get_app_env() {
     .await;
 
     let req = test::TestRequest::put()
-        .uri(&format!("/app/{}/env", app_name))
+        .uri(&format!("/app/{}/process/web/env", app_name))
         .set_json(json!({"FOO": "bar", "BAZ": "qux"}))
         .to_request();
     let resp = test::call_service(&app, req).await;
     assert_eq!(resp.status(), 200);
 
     let req = test::TestRequest::get()
-        .uri(&format!("/app/{}/env", app_name))
+        .uri(&format!("/app/{}/process/web/env", app_name))
         .to_request();
     let resp = test::call_service(&app, req).await;
     let body: serde_json::Value = test::read_body_json(resp).await;
@@ -936,19 +873,7 @@ async fn test_logs_app_no_container() {
     let pool = build_pool().await;
     let app_name = "test-logs-app-no-container";
 
-    cleanup_app(pool.get_ref(), app_name).await;
-    Registry::save(
-        pool.get_ref(),
-        app_name,
-        "",
-        "",
-        None,
-        9013,
-        "stopped",
-        None,
-    )
-    .await
-    .unwrap();
+    insert_test_app_process(pool.get_ref(), app_name, "stopped").await;
 
     let app = test::init_service(
         App::new()
