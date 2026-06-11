@@ -69,7 +69,7 @@ impl Registry {
         sqlx::query_as::<_, AppProcess>(
             r#"
             SELECT id, application_id, name, process_type, build_context, public_host, build_env,
-                image_id, container_id, internal_port, host_port, status, created_at
+                image_id, container_id, internal_port, host_port, status, replica_group, created_at
             FROM application_processes
             WHERE application_id = $1 AND name = $2
             "#,
