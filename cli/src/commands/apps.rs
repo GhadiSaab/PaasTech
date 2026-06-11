@@ -24,8 +24,10 @@ struct App {
 #[derive(Deserialize)]
 struct AppProcess {
     name: String,
+    process_type: String,
     image_id: Option<String>,
     host_port: Option<i32>,
+    status: String,
 }
 
 #[derive(Deserialize)]
@@ -39,11 +41,42 @@ struct ManifestProject {
 }
 
 fn print_table(apps: &[App]) {
-    let col_name = apps.iter().map(|a| a.name.len()).max().unwrap_or(4).max(4);
-    let col_image = apps
+    let rows: Vec<(&App, Option<&AppProcess>)> = apps
         .iter()
-        .map(|a| {
-            primary_process(a)
+        .flat_map(|app| {
+            if app.processes.is_empty() {
+                vec![(app, None)]
+            } else {
+                app.processes
+                    .iter()
+                    .map(|process| (app, Some(process)))
+                    .collect()
+            }
+        })
+        .collect();
+
+    let col_app = rows
+        .iter()
+        .map(|(app, _)| app.name.len())
+        .max()
+        .unwrap_or(3)
+        .max(3);
+    let col_process = rows
+        .iter()
+        .map(|(_, process)| process.map(|p| p.name.len()).unwrap_or(1))
+        .max()
+        .unwrap_or(7)
+        .max(7);
+    let col_type = rows
+        .iter()
+        .map(|(_, process)| process.map(|p| p.process_type.len()).unwrap_or(1))
+        .max()
+        .unwrap_or(4)
+        .max(4);
+    let col_image = rows
+        .iter()
+        .map(|(_, process)| {
+            process
                 .and_then(|p| p.image_id.as_deref())
                 .unwrap_or("-")
                 .len()
@@ -51,10 +84,10 @@ fn print_table(apps: &[App]) {
         .max()
         .unwrap_or(5)
         .max(5);
-    let col_port = apps
+    let col_port = rows
         .iter()
-        .map(|a| {
-            primary_process(a)
+        .map(|(_, process)| {
+            process
                 .and_then(|p| p.host_port)
                 .map(|p| p.to_string().len())
                 .unwrap_or(1)
@@ -62,17 +95,19 @@ fn print_table(apps: &[App]) {
         .max()
         .unwrap_or(4)
         .max(4);
-    let col_status = apps
+    let col_status = rows
         .iter()
-        .map(|a| a.status.len())
+        .map(|(app, process)| process.map(|p| p.status.len()).unwrap_or(app.status.len()))
         .max()
         .unwrap_or(6)
         .max(6);
     let col_created = 26_usize;
 
     let sep = format!(
-        "+-{}-+-{}-+-{}-+-{}-+-{}-+",
-        "-".repeat(col_name),
+        "+-{}-+-{}-+-{}-+-{}-+-{}-+-{}-+-{}-+",
+        "-".repeat(col_app),
+        "-".repeat(col_process),
+        "-".repeat(col_type),
         "-".repeat(col_image),
         "-".repeat(col_port),
         "-".repeat(col_status),
@@ -81,13 +116,17 @@ fn print_table(apps: &[App]) {
 
     println!("{}", sep);
     println!(
-        "| {:<col_name$} | {:<col_image$} | {:<col_port$} | {:<col_status$} | {:<col_created$} |",
-        "name".bold(),
+        "| {:<col_app$} | {:<col_process$} | {:<col_type$} | {:<col_image$} | {:<col_port$} | {:<col_status$} | {:<col_created$} |",
+        "app".bold(),
+        "process".bold(),
+        "type".bold(),
         "image".bold(),
         "port".bold(),
         "status".bold(),
         "created at".bold(),
-        col_name = col_name,
+        col_app = col_app,
+        col_process = col_process,
+        col_type = col_type,
         col_image = col_image,
         col_port = col_port,
         col_status = col_status,
@@ -95,26 +134,32 @@ fn print_table(apps: &[App]) {
     );
     println!("{}", sep);
 
-    for a in apps {
-        let primary = primary_process(a);
-        let image = primary.and_then(|p| p.image_id.as_deref()).unwrap_or("-");
-        let port = primary
+    for (app, process) in rows {
+        let process_name = process.map(|p| p.name.as_str()).unwrap_or("-");
+        let process_type = process.map(|p| p.process_type.as_str()).unwrap_or("-");
+        let image = process.and_then(|p| p.image_id.as_deref()).unwrap_or("-");
+        let port = process
             .and_then(|p| p.host_port)
             .map(|p| p.to_string())
             .unwrap_or_else(|| "-".into());
-        let created = a.created_at.as_deref().unwrap_or("-");
-        let (status_colored, status_len) = colored_status(&a.status);
+        let raw_status = process.map(|p| p.status.as_str()).unwrap_or(&app.status);
+        let created = app.created_at.as_deref().unwrap_or("-");
+        let (status_colored, status_len) = colored_status(raw_status);
         let status_pad = col_status.saturating_sub(status_len);
 
         println!(
-            "| {:<col_name$} | {:<col_image$} | {:<col_port$} | {}{} | {:<col_created$} |",
-            a.name,
+            "| {:<col_app$} | {:<col_process$} | {:<col_type$} | {:<col_image$} | {:<col_port$} | {}{} | {:<col_created$} |",
+            app.name,
+            process_name,
+            process_type,
             image,
             port,
             status_colored,
             " ".repeat(status_pad),
             created,
-            col_name = col_name,
+            col_app = col_app,
+            col_process = col_process,
+            col_type = col_type,
             col_image = col_image,
             col_port = col_port,
             col_created = col_created,
@@ -122,13 +167,6 @@ fn print_table(apps: &[App]) {
     }
 
     println!("{}", sep);
-}
-
-fn primary_process(app: &App) -> Option<&AppProcess> {
-    app.processes
-        .iter()
-        .find(|process| process.name == "web")
-        .or_else(|| app.processes.first())
 }
 
 // GET /app — exists
