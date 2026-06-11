@@ -62,9 +62,27 @@ pub struct ResourceDefinition {
 }
 
 #[derive(Debug, Deserialize)]
+struct ManifestProcess {
+    name: String,
+    #[serde(rename = "type")]
+    process_type: ProcessType,
+    path: String,
+    port: Option<u16>,
+    public_host: Option<String>,
+    #[serde(default)]
+    build_env: HashMap<String, String>,
+    #[serde(default = "default_replicas")]
+    replicas: u32,
+}
+
+fn default_replicas() -> u32 {
+    1
+}
+
+#[derive(Debug, Deserialize)]
 struct PaastechManifest {
     #[serde(default)]
-    processes: Vec<ProcessDefinition>,
+    processes: Vec<ManifestProcess>,
     #[serde(default)]
     resources: Vec<ResourceDefinition>,
 }
@@ -139,8 +157,39 @@ pub fn load_process_definitions(
         return Ok(vec![fallback]);
     }
 
+    let mut definitions = Vec::new();
+    for entry in manifest.processes {
+        if entry.replicas == 0 {
+            return Err(format!(
+                "process '{}' replicas must be at least 1",
+                entry.name
+            ));
+        }
+        if entry.replicas == 1 {
+            definitions.push(ProcessDefinition {
+                name: entry.name,
+                process_type: entry.process_type,
+                path: entry.path,
+                port: entry.port,
+                public_host: entry.public_host,
+                build_env: entry.build_env,
+            });
+        } else {
+            for i in 1..=entry.replicas {
+                definitions.push(ProcessDefinition {
+                    name: format!("{}-{}", entry.name, i),
+                    process_type: entry.process_type.clone(),
+                    path: entry.path.clone(),
+                    port: entry.port,
+                    public_host: entry.public_host.clone(),
+                    build_env: entry.build_env.clone(),
+                });
+            }
+        }
+    }
+
     let mut seen_names = std::collections::HashSet::new();
-    for process in &manifest.processes {
+    for process in &definitions {
         if !seen_names.insert(process.name.as_str()) {
             return Err(format!(
                 "paastech.toml contains duplicate process name '{}'",
@@ -150,7 +199,7 @@ pub fn load_process_definitions(
         validate_process_definition(root, process)?;
     }
 
-    Ok(manifest.processes)
+    Ok(definitions)
 }
 
 pub fn load_resource_definitions(root: &Path) -> Result<Vec<ResourceDefinition>, String> {
@@ -438,6 +487,91 @@ port = 3000
         assert_eq!(processes[0].process_type, ProcessType::Web);
         assert_eq!(processes[0].path, "api");
         assert_eq!(processes[0].port, Some(3000));
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn replicas_expands_process_into_numbered_instances() {
+        let root = temp_project();
+        fs::create_dir_all(root.join("worker")).unwrap();
+        fs::write(
+            root.join("paastech.toml"),
+            r#"
+[project]
+name = "demo"
+
+[[processes]]
+name = "worker"
+type = "worker"
+path = "worker"
+replicas = 3
+"#,
+        )
+        .unwrap();
+
+        let processes = load_process_definitions(&root, None).unwrap();
+
+        assert_eq!(processes.len(), 3);
+        assert_eq!(processes[0].name, "worker-1");
+        assert_eq!(processes[1].name, "worker-2");
+        assert_eq!(processes[2].name, "worker-3");
+        for p in &processes {
+            assert_eq!(p.process_type, ProcessType::Worker);
+            assert_eq!(p.path, "worker");
+        }
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn replicas_one_keeps_original_name() {
+        let root = temp_project();
+        fs::create_dir_all(root.join("worker")).unwrap();
+        fs::write(
+            root.join("paastech.toml"),
+            r#"
+[project]
+name = "demo"
+
+[[processes]]
+name = "worker"
+type = "worker"
+path = "worker"
+replicas = 1
+"#,
+        )
+        .unwrap();
+
+        let processes = load_process_definitions(&root, None).unwrap();
+
+        assert_eq!(processes.len(), 1);
+        assert_eq!(processes[0].name, "worker");
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn replicas_zero_is_an_error() {
+        let root = temp_project();
+        fs::create_dir_all(root.join("worker")).unwrap();
+        fs::write(
+            root.join("paastech.toml"),
+            r#"
+[project]
+name = "demo"
+
+[[processes]]
+name = "worker"
+type = "worker"
+path = "worker"
+replicas = 0
+"#,
+        )
+        .unwrap();
+
+        let result = load_process_definitions(&root, None);
+        assert!(result.is_err());
 
         fs::remove_dir_all(root).unwrap();
     }
