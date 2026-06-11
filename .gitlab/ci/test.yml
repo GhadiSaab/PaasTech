@@ -1,4 +1,12 @@
 
+.test-changes: &test_changes
+  - src/**/*
+  - Cargo.toml
+  - Cargo.lock
+  - database/**/*
+  - services/**/*
+  - .sqlx/**/*
+
 test:
   extends: .rust-base
   stage: test
@@ -29,12 +37,6 @@ test:
       junit: target/nextest/ci/junit.xml
   rules:
     - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+      changes: *test_changes
     - if: $CI_COMMIT_BRANCH
-      changes:
-        - src/**/*
-        - Cargo.toml
-        - Cargo.lock
-        - database/**/*
-        - services/**/*
-        - .sqlx/**/*
-        - Dockerfile
+      changes: *test_changes

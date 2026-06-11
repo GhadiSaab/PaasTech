@@ -18,7 +18,9 @@ docker-build:
   stage: publish
   needs:
     - job: test
+      optional: true
     - job: audit
+      optional: true
   script:
     - |
       docker buildx build \

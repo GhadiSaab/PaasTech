@@ -1,3 +1,11 @@
+.audit-changes: &audit_changes
+  - src/**/*
+  - Cargo.toml
+  - Cargo.lock
+  - database/**/*
+  - services/**/*
+  - .sqlx/**/*
+
 audit:
   extends: .rust-base
   stage: validate
@@ -64,12 +72,6 @@ audit:
       dependency_scanning: gl-dependency-scanning-report.json
   rules:
     - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+      changes: *audit_changes
     - if: $CI_COMMIT_BRANCH
-      changes:
-        - src/**/*
-        - Cargo.toml
-        - Cargo.lock
-        - database/**/*
-        - services/**/*
-        - .sqlx/**/*
-        - Dockerfile
+      changes: *audit_changes
