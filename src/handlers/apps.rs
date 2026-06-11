@@ -473,6 +473,10 @@ pub async fn deploy(
         Err(DeployError::PortRequired(message)) => {
             HttpResponse::UnprocessableEntity().body(message)
         }
+        Err(DeployError::RolledBack(message)) => {
+            eprintln!("deploy: rolled back {}: {message}", body.name);
+            HttpResponse::InternalServerError().body(message)
+        }
         Err(DeployError::Other(message)) => {
             eprintln!("deploy: failed to deploy {}: {message}", body.name);
             HttpResponse::InternalServerError().body(message)
@@ -660,6 +664,7 @@ pub async fn update(
     let extracted_folder_panic = extracted_folder.clone();
     let handle = tokio::spawn(async move {
         let mut failed = false;
+        let mut rolled_back = false;
 
         for (process, row, existed) in process_rows {
             let image_name = format!("{}-{}", app_name_bg, process.name);
@@ -777,14 +782,18 @@ pub async fn update(
                         "update: failed for {} process {}: {e}",
                         app_name_bg, process.name
                     );
-                    let _ = Registry::update_process_status(&pool_bg, row.id, "failed").await;
-                    failed = true;
+                    if matches!(e, crate::scheduler::DeployError::RolledBack(_)) {
+                        rolled_back = true;
+                    } else {
+                        let _ = Registry::update_process_status(&pool_bg, row.id, "failed").await;
+                        failed = true;
+                    }
                     break;
                 }
             }
         }
 
-        if !failed {
+        if !failed && !rolled_back {
             for process in removed_processes {
                 scheduler_bg
                     .stop(&app_process_container_name(
@@ -1168,28 +1177,17 @@ pub async fn delete(
         }
     };
 
-    match Registry::list_processes(&scope.pool, app.id).await {
-        Ok(processes) if !processes.is_empty() => {
-            for process in processes {
-                scheduler
-                    .stop(&app_process_container_name(
-                        app.project_id,
-                        &app_name,
-                        &process.name,
-                    ))
-                    .await;
-            }
-        }
-        Ok(_) => {
-            scheduler
-                .stop(&app_container_name(app.project_id, &app_name))
-                .await
-        }
+    let containers = match Registry::list_processes(&scope.pool, app.id).await {
+        Ok(processes) if !processes.is_empty() => processes
+            .into_iter()
+            .map(|process| app_process_container_name(app.project_id, &app_name, &process.name))
+            .collect::<Vec<_>>(),
+        Ok(_) => vec![app_container_name(app.project_id, &app_name)],
         Err(e) => {
             eprintln!("registry: failed to list processes for {app_name}: {e}");
             return HttpResponse::InternalServerError().finish();
         }
-    }
+    };
 
     let mut tx = match scope.pool.begin().await {
         Ok(tx) => tx,
@@ -1221,6 +1219,10 @@ pub async fn delete(
     if let Err(e) = tx.commit().await {
         eprintln!("registry: failed to commit delete for {app_name}: {e}");
         return HttpResponse::InternalServerError().finish();
+    }
+
+    for container in containers {
+        scheduler.stop(&container).await;
     }
 
     HttpResponse::NoContent().finish()

@@ -246,7 +246,7 @@ pub async fn delete(name: &str) -> Result<(), String> {
     pb.finish_and_clear();
 
     match resp.status().as_u16() {
-        204 => println!("App {} successfully deleted", name.bold()),
+        204 => println!("{} App {} deleted", "✓".green(), name.bold()),
         404 => return Err(format!("App '{}' not found", name)),
         code => return Err(format!("Server error: {}", code)),
     }
@@ -290,13 +290,21 @@ pub async fn upload(source: &str) -> Result<(), String> {
 }
 
 // GET /app/{name}/logs
-pub async fn logs(name: &str, tail: Option<u32>, follow: bool) -> Result<(), String> {
+pub async fn logs(
+    name: &str,
+    tail: Option<u32>,
+    follow: bool,
+    process: Option<&str>,
+) -> Result<(), String> {
     let mut url = app_url(name, "logs")?;
     if let Some(n) = tail {
         url.query_pairs_mut().append_pair("tail", &n.to_string());
     }
     if follow {
         url.query_pairs_mut().append_pair("follow", "true");
+    }
+    if let Some(process) = process {
+        url.query_pairs_mut().append_pair("process", process);
     }
 
     let mut resp = reqwest::get(url)
