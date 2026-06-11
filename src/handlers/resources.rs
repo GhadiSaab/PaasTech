@@ -17,7 +17,7 @@ use crate::extractor::ProjectScope;
 use crate::garage;
 use crate::models::{CreateResourcePayload, Resource, ResourceAttachment, UpdateResourcePayload};
 use crate::registry::Registry;
-use crate::scheduler::{Scheduler, app_container_name, app_process_container_name};
+use crate::scheduler::{Scheduler, app_process_container_name};
 
 #[derive(Deserialize)]
 pub struct LogsQuery {
@@ -73,25 +73,34 @@ async fn inject_service_env_into_app(
     let env_vars =
         connection_env_vars_for_service(service_name, service_host, service_port, &connection_env)
             .map_err(sqlx::Error::Protocol)?;
+    let process_rows =
+        sqlx::query("SELECT id FROM application_processes WHERE application_id = $1")
+            .bind(app_uuid)
+            .fetch_all(&mut **tx)
+            .await?;
 
-    if service_name == "postgres" {
-        sqlx::query(
-            "DELETE FROM application_env_vars WHERE application_id = $1 AND key IN ('DATABASE_ASYNC_URL', 'DATABASE_SYNC_URL')",
-        )
-        .bind(app_uuid)
-        .execute(&mut **tx)
-        .await?;
-    }
+    for process_row in process_rows {
+        let process_id: Uuid = process_row.try_get("id")?;
 
-    for (key, value) in env_vars {
-        sqlx::query!(
-            "INSERT INTO application_env_vars (application_id, key, value) VALUES ($1, $2, $3) ON CONFLICT (application_id, key) DO UPDATE SET value = EXCLUDED.value",
-            app_uuid,
-            key,
-            value,
-        )
-        .execute(&mut **tx)
-        .await?;
+        if service_name == "postgres" {
+            sqlx::query(
+                "DELETE FROM process_env_vars WHERE process_id = $1 AND key IN ('DATABASE_ASYNC_URL', 'DATABASE_SYNC_URL')",
+            )
+            .bind(process_id)
+            .execute(&mut **tx)
+            .await?;
+        }
+
+        for (key, value) in &env_vars {
+            sqlx::query(
+                "INSERT INTO process_env_vars (process_id, key, value) VALUES ($1, $2, $3) ON CONFLICT (process_id, key) DO UPDATE SET value = EXCLUDED.value",
+            )
+            .bind(process_id)
+            .bind(key)
+            .bind(value)
+            .execute(&mut **tx)
+            .await?;
+        }
     }
     Ok(())
 }
@@ -148,17 +157,9 @@ async fn ensure_attached_service_network(
     app_ids: &[Uuid],
 ) -> Result<(), actix_web::Error> {
     for app_id in app_ids {
-        let Some(app) = sqlx::query_as::<_, crate::registry::App>(
-            r#"
-            SELECT id, project_id, name, image_id, container_id, internal_port, port, status, base_domain, created_at
-            FROM applications
-            WHERE id = $1
-            "#,
-        )
-        .bind(app_id)
-        .fetch_optional(pool)
-        .await
-        .map_err(error::ErrorInternalServerError)?
+        let Some(app) = Registry::get_by_id(pool, *app_id)
+            .await
+            .map_err(error::ErrorInternalServerError)?
         else {
             continue;
         };
@@ -178,29 +179,7 @@ async fn ensure_attached_service_network(
                 ))
             })?;
 
-        let processes = Registry::list_processes(pool, app.id)
-            .await
-            .map_err(error::ErrorInternalServerError)?;
-
-        if processes.is_empty() {
-            if app.container_id.as_deref().is_some_and(|id| !id.is_empty()) {
-                scheduler
-                    .ensure_container_on_network(
-                        &project.network_name,
-                        &app_container_name(app.project_id, &app.name),
-                    )
-                    .await
-                    .map_err(|e| {
-                        error::ErrorInternalServerError(format!(
-                            "Failed to connect {} to project network: {e}",
-                            app.name
-                        ))
-                    })?;
-            }
-            continue;
-        }
-
-        for process in processes {
+        for process in app.processes {
             if process
                 .container_id
                 .as_deref()
@@ -856,13 +835,9 @@ async fn create_s3_resource(
     for attachment in &attachments {
         let app_uuid = Uuid::parse_str(&attachment.application_id)
             .map_err(|_| error::ErrorBadRequest("Invalid application_id"))?;
-        let app = sqlx::query_as::<_, crate::registry::App>(
-            "SELECT id, project_id, name, image_id, container_id, internal_port, port, status, base_domain, created_at FROM applications WHERE id = $1",
-        )
-        .bind(app_uuid)
-        .fetch_optional(scope.pool.get_ref())
-        .await
-        .map_err(error::ErrorInternalServerError)?;
+        let app = Registry::get_by_id(scope.pool.get_ref(), app_uuid)
+            .await
+            .map_err(error::ErrorInternalServerError)?;
 
         if let Some(app) = app {
             let project = Registry::get_project_by_id(scope.pool.get_ref(), app.project_id)
@@ -1137,13 +1112,9 @@ pub async fn update(
     if !attached_app_uuids.is_empty() {
         if is_s3 {
             for app_uuid in &attached_app_uuids {
-                let Some(app) = sqlx::query_as::<_, crate::registry::App>(
-                    "SELECT id, project_id, name, image_id, container_id, internal_port, port, status, base_domain, created_at FROM applications WHERE id = $1",
-                )
-                .bind(app_uuid)
-                .fetch_optional(pool.get_ref())
-                .await
-                .map_err(error::ErrorInternalServerError)?
+                let Some(app) = Registry::get_by_id(pool.get_ref(), *app_uuid)
+                    .await
+                    .map_err(error::ErrorInternalServerError)?
                 else {
                     continue;
                 };

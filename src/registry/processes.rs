@@ -59,6 +59,25 @@ impl Registry {
         .await
     }
 
+    pub async fn get_process_by_name(
+        pool: &PgPool,
+        application_id: Uuid,
+        process_name: &str,
+    ) -> Result<Option<AppProcess>, sqlx::Error> {
+        sqlx::query_as::<_, AppProcess>(
+            r#"
+            SELECT id, application_id, name, process_type, build_context, public_host, build_env,
+                image_id, container_id, internal_port, host_port, status, created_at
+            FROM application_processes
+            WHERE application_id = $1 AND name = $2
+            "#,
+        )
+        .bind(application_id)
+        .bind(process_name)
+        .fetch_optional(pool)
+        .await
+    }
+
     pub async fn delete_processes(pool: &PgPool, application_id: Uuid) -> Result<(), sqlx::Error> {
         sqlx::query("DELETE FROM application_processes WHERE application_id = $1")
             .bind(application_id)

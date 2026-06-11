@@ -25,17 +25,16 @@ pub struct App {
     #[schema(value_type = String)]
     pub project_id: Uuid,
     pub name: String,
-    pub image_id: Option<String>,
-    pub container_id: Option<String>,
-    pub internal_port: Option<i32>,
-    pub port: Option<i32>,
-    pub status: Option<String>,
     pub base_domain: Option<String>,
     #[schema(value_type = Option<String>)]
     pub created_at: Option<NaiveDateTime>,
+    #[sqlx(skip)]
+    pub status: String,
+    #[sqlx(skip)]
+    pub processes: Vec<AppProcess>,
 }
 
-#[derive(Debug, sqlx::FromRow, serde::Serialize, utoipa::ToSchema)]
+#[derive(Debug, Clone, sqlx::FromRow, serde::Serialize, utoipa::ToSchema)]
 pub struct AppProcess {
     #[schema(value_type = String)]
     pub id: Uuid,
@@ -76,4 +75,20 @@ pub struct ActiveAppProcess {
     pub host_port: Option<i32>,
     pub status: String,
     pub base_domain: Option<String>,
+}
+
+pub fn derived_status(processes: &[AppProcess]) -> &'static str {
+    if processes.iter().any(|p| p.status == "building") {
+        return "building";
+    }
+    if processes.iter().any(|p| p.status == "failed") {
+        return "failed";
+    }
+    if processes.iter().any(|p| p.status == "crashed") {
+        return "crashed";
+    }
+    if !processes.is_empty() && processes.iter().all(|p| p.status == "running") {
+        return "running";
+    }
+    "stopped"
 }
