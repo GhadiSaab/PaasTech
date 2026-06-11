@@ -146,9 +146,6 @@ enum AppCommands {
         /// Stream logs in real time (like docker logs -f)
         #[arg(long, short = 'f')]
         follow: bool,
-        /// Show logs for this process
-        #[arg(long)]
-        process: Option<String>,
     },
     /// Manage environment variables
     Env {
@@ -296,7 +293,7 @@ enum ResourceEnvCommands {
 }
 
 pub fn api_base() -> String {
-    std::env::var("PAAS_API_URL").unwrap_or_else(|_| "https://api.paastech.polydo.dev".to_string())
+    std::env::var("PAAS_API_URL").unwrap_or_else(|_| "https://api.paastech.izoret.fr".to_string())
 }
 
 fn main() {
