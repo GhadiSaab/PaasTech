@@ -15,12 +15,10 @@ use bollard::query_parameters::{
 use futures_util::StreamExt;
 use futures_util::TryStreamExt;
 use serde::Serialize;
-use sqlx::PgPool;
 use std::collections::HashMap;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crate::engine::ProcessType;
-use crate::registry::Registry;
 use uuid::Uuid;
 
 #[derive(Debug)]
@@ -916,132 +914,6 @@ impl Scheduler {
                 Some(RemoveContainerOptionsBuilder::default().build()),
             )
             .await?;
-
-        Ok(())
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    pub async fn deploy(
-        &self,
-        pool: &PgPool,
-        project_id: Uuid,
-        network_name: &str,
-        app_name: &str,
-        image: &str,
-        internal_port: Option<u16>,
-        env_vars: Vec<String>,
-        base_domain: Option<&str>,
-    ) -> Result<(), DeployError> {
-        let image = self.pull(image).await?;
-        let internal_port = self.resolve_internal_port(&image, internal_port).await?;
-
-        let host_port = find_free_port().map_err(|e| {
-            DeployError::Other(format!("Failed to find free port for {app_name}: {e}"))
-        })?;
-
-        let domain = resolve_domain(base_domain);
-        let traefik_net = (domain != "localhost").then(traefik_network_name);
-        let labels = traefik_labels(app_name, None, internal_port, &domain, None);
-        let container_name = app_container_name(project_id, app_name);
-
-        let container_id = self
-            .create_and_start(
-                &container_name,
-                network_name,
-                &image,
-                internal_port,
-                host_port,
-                labels,
-                {
-                    let mut env_vars = env_vars;
-                    env_vars.push(format!("PORT={internal_port}"));
-                    env_vars
-                },
-                traefik_net.as_deref(),
-            )
-            .await
-            .map_err(|e| DeployError::Other(format!("Failed to create/start {app_name}: {e}")))?;
-
-        Registry::upsert_in_project(
-            pool,
-            project_id,
-            app_name,
-            &image,
-            &container_id,
-            Some(internal_port as i32),
-            host_port as i32,
-            "running",
-            base_domain,
-        )
-        .await
-        .map_err(|e| DeployError::Other(format!("Failed to save app {app_name}: {e}")))?;
-
-        Ok(())
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    pub async fn redeploy(
-        &self,
-        pool: &PgPool,
-        project_id: Uuid,
-        network_name: &str,
-        app_name: &str,
-        image: &str,
-        internal_port: u16,
-        host_port: u16,
-        env_vars: Vec<String>,
-        base_domain: Option<&str>,
-    ) -> Result<(), DeployError> {
-        let image = self.pull(image).await?;
-        let container_name = app_container_name(project_id, app_name);
-
-        let _ = self
-            .docker
-            .stop_container(
-                &container_name,
-                Some(StopContainerOptionsBuilder::default().build()),
-            )
-            .await;
-
-        let _ = self
-            .docker
-            .remove_container(
-                &container_name,
-                Some(RemoveContainerOptionsBuilder::default().build()),
-            )
-            .await;
-
-        let domain = resolve_domain(base_domain);
-        let traefik_net = (domain != "localhost").then(traefik_network_name);
-        let labels = traefik_labels(app_name, None, internal_port, &domain, None);
-
-        let container_id = self
-            .create_and_start(
-                &container_name,
-                network_name,
-                &image,
-                internal_port,
-                host_port,
-                labels,
-                {
-                    let mut env_vars = env_vars;
-                    env_vars.push(format!("PORT={internal_port}"));
-                    env_vars
-                },
-                traefik_net.as_deref(),
-            )
-            .await
-            .map_err(|e| DeployError::Other(format!("Failed to recreate {app_name}: {e}")))?;
-
-        Registry::update_container_id(pool, project_id, app_name, &container_id)
-            .await
-            .map_err(|e| DeployError::Other(format!("Failed to update container_id: {e}")))?;
-
-        Registry::update_status(pool, project_id, app_name, "running")
-            .await
-            .map_err(|e| {
-                DeployError::Other(format!("Failed to update status for {app_name}: {e}"))
-            })?;
 
         Ok(())
     }

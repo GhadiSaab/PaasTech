@@ -15,7 +15,6 @@ use tokio::fs;
 use utoipa::OpenApi;
 use utoipa_swagger_ui::SwaggerUi;
 
-use crate::handlers::apps::DeployBody;
 use crate::models::{CreateProjectPayload, CreateResourcePayload, Resource, UpdateResourcePayload};
 use crate::scheduler::Scheduler;
 
@@ -59,7 +58,6 @@ async fn init() -> Config {
         handlers::projects::update_env,
         handlers::apps::upload,
         handlers::apps::list,
-        handlers::apps::deploy,
         handlers::apps::update,
         handlers::apps::stop,
         handlers::apps::restart,
@@ -83,7 +81,6 @@ async fn init() -> Config {
     components(schemas(
         registry::App,
         registry::Project,
-        DeployBody,
         Resource,
         CreateProjectPayload,
         CreateResourcePayload,

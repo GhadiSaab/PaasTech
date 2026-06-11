@@ -91,17 +91,6 @@ enum ProjectEnvCommands {
 
 #[derive(Subcommand)]
 enum AppCommands {
-    /// Deploy an application from a Docker image
-    Deploy {
-        /// Application name
-        name: String,
-        /// Docker image to deploy (e.g. nginx, node:20)
-        #[arg(long)]
-        image: String,
-        /// Port the container exposes (1-65535)
-        #[arg(long, default_value = "8080", value_parser = clap::value_parser!(u16).range(1..))]
-        port: u16,
-    },
     /// List all applications
     List,
     /// Delete an application
@@ -115,18 +104,27 @@ enum AppCommands {
         /// Application name
         #[arg(add = ArgValueCompleter::new(AppNameCompleter))]
         name: String,
+        /// Process name
+        #[arg(long)]
+        process: Option<String>,
     },
     /// Stop a running application
     Stop {
         /// Application name
         #[arg(add = ArgValueCompleter::new(AppNameCompleter))]
         name: String,
+        /// Stop only this process
+        #[arg(long)]
+        process: Option<String>,
     },
     /// Restart an application
     Restart {
         /// Application name
         #[arg(add = ArgValueCompleter::new(AppNameCompleter))]
         name: String,
+        /// Restart only this process
+        #[arg(long)]
+        process: Option<String>,
     },
     /// Upload a zip of source code to the server
     Upload {
@@ -148,6 +146,9 @@ enum AppCommands {
         /// Stream logs in real time (like docker logs -f)
         #[arg(long, short = 'f')]
         follow: bool,
+        /// Show logs for this process
+        #[arg(long)]
+        process: Option<String>,
     },
     /// Manage environment variables
     Env {
@@ -163,6 +164,9 @@ enum EnvCommands {
         /// Application name
         #[arg(add = ArgValueCompleter::new(AppNameCompleter))]
         name: String,
+        /// Process name
+        #[arg(long, default_value = "web")]
+        process: String,
         /// Key=Value pair
         pair: String,
     },
@@ -171,6 +175,9 @@ enum EnvCommands {
         /// Application name
         #[arg(add = ArgValueCompleter::new(AppNameCompleter))]
         name: String,
+        /// Process name
+        #[arg(long, default_value = "web")]
+        process: String,
     },
 }
 
@@ -289,7 +296,7 @@ enum ResourceEnvCommands {
 }
 
 pub fn api_base() -> String {
-    std::env::var("PAAS_API_URL").unwrap_or_else(|_| "http://127.0.0.1:8080".to_string())
+    std::env::var("PAAS_API_URL").unwrap_or_else(|_| "https://api.paastech.polydo.dev".to_string())
 }
 
 fn main() {
@@ -323,12 +330,13 @@ async fn async_main() {
             return;
         }
         Commands::App { command } => match command {
-            AppCommands::Deploy { name, image, port } => apps::deploy(&name, &image, port).await,
             AppCommands::List => apps::list().await,
             AppCommands::Delete { name } => apps::delete(&name).await,
-            AppCommands::Info { name } => apps::info(&name).await,
-            AppCommands::Stop { name } => apps::stop(&name).await,
-            AppCommands::Restart { name } => apps::restart(&name).await,
+            AppCommands::Info { name, process } => apps::info(&name, process.as_deref()).await,
+            AppCommands::Stop { name, process } => apps::stop(&name, process.as_deref()).await,
+            AppCommands::Restart { name, process } => {
+                apps::restart(&name, process.as_deref()).await
+            }
             AppCommands::Upload { source } => apps::upload(&source).await,
             AppCommands::Logs {
                 name,
@@ -337,8 +345,12 @@ async fn async_main() {
                 follow,
             } => apps::logs(&name, tail, follow, process.as_deref()).await,
             AppCommands::Env { command } => match command {
-                EnvCommands::Set { name, pair } => apps::env_set(&name, &pair).await,
-                EnvCommands::List { name } => apps::env_list(&name).await,
+                EnvCommands::Set {
+                    name,
+                    process,
+                    pair,
+                } => apps::env_set(&name, &process, &pair).await,
+                EnvCommands::List { name, process } => apps::env_list(&name, &process).await,
             },
         },
         Commands::Resource { command } => match command {

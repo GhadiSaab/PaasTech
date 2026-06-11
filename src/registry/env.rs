@@ -6,19 +6,19 @@ use uuid::Uuid;
 use super::Registry;
 
 impl Registry {
-    pub async fn get_app_env(
+    pub async fn get_process_env(
         pool: &PgPool,
-        application_id: Uuid,
+        process_id: Uuid,
     ) -> Result<Vec<String>, sqlx::Error> {
         let rows = sqlx::query(
             r#"
             SELECT key, value
-            FROM application_env_vars
-            WHERE application_id = $1
+            FROM process_env_vars
+            WHERE process_id = $1
             ORDER BY key
             "#,
         )
-        .bind(application_id)
+        .bind(process_id)
         .fetch_all(pool)
         .await?;
 
@@ -31,10 +31,10 @@ impl Registry {
             .collect()
     }
 
-    pub async fn merged_env_vars(
+    pub async fn merged_process_env_vars(
         pool: &PgPool,
         project_id: Uuid,
-        app_id: Uuid,
+        process_id: Uuid,
     ) -> Result<Vec<String>, sqlx::Error> {
         let project_rows = sqlx::query(
             r#"
@@ -48,15 +48,15 @@ impl Registry {
         .fetch_all(pool)
         .await?;
 
-        let app_rows = sqlx::query(
+        let process_rows = sqlx::query(
             r#"
             SELECT key, value
-            FROM application_env_vars
-            WHERE application_id = $1
+            FROM process_env_vars
+            WHERE process_id = $1
             ORDER BY key
             "#,
         )
-        .bind(app_id)
+        .bind(process_id)
         .fetch_all(pool)
         .await?;
 
@@ -66,7 +66,7 @@ impl Registry {
             let value: String = row.try_get("value")?;
             map.insert(key, value);
         }
-        for row in app_rows {
+        for row in process_rows {
             let key: String = row.try_get("key")?;
             let value: String = row.try_get("value")?;
             map.insert(key, value);
