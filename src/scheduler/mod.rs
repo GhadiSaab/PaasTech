@@ -95,14 +95,17 @@ pub(super) fn build_traefik_labels(
     app_name: &str,
     process_name: Option<&str>,
     internal_port: u16,
-    version: &str,
+    version: Option<&str>,
     base_domain: &str,
     public_host: Option<&str>,
 ) -> HashMap<String, String> {
     let service_base = process_name
         .map(|process_name| format!("{app_name}-{process_name}"))
         .unwrap_or_else(|| app_name.to_string());
-    let service_name = format!("{service_base}-{version}");
+    let service_name = match version {
+        Some(v) => format!("{service_base}-{v}"),
+        None => service_base.clone(),
+    };
     let router_name = &service_name;
     let host = public_host
         .map(str::to_string)
@@ -166,7 +169,19 @@ fn traefik_labels(
     internal_port: u16,
     base_domain: &str,
     public_host: Option<&str>,
+    replica_group: Option<&str>,
 ) -> HashMap<String, String> {
+    if let Some(group) = replica_group {
+        // All replicas share a fixed service name — Traefik load balances across them.
+        return build_traefik_labels(
+            app_name,
+            Some(group),
+            internal_port,
+            None,
+            base_domain,
+            public_host,
+        );
+    }
     let version = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
@@ -176,7 +191,7 @@ fn traefik_labels(
         app_name,
         process_name,
         internal_port,
-        &version,
+        Some(&version),
         base_domain,
         public_host,
     )
@@ -595,6 +610,7 @@ impl Scheduler {
         base_domain: Option<&str>,
         public_host: Option<&str>,
         env_vars: Vec<String>,
+        replica_group: Option<&str>,
     ) -> Result<ProcessStartResult, DeployError> {
         let image = self.pull(image).await?;
         let container_name = app_process_container_name(project_id, app_name, process_name);
@@ -615,6 +631,7 @@ impl Scheduler {
                     internal_port,
                     &domain,
                     public_host,
+                    replica_group,
                 );
                 let mut env_vars = env_vars;
                 env_vars.push(format!("PORT={internal_port}"));
@@ -940,7 +957,7 @@ mod tests {
 
     #[test]
     fn build_traefik_labels_uses_versioned_router_and_service_names() {
-        let labels = build_traefik_labels("api", None, 8080, "123", "example.com", None);
+        let labels = build_traefik_labels("api", None, 8080, Some("123"), "example.com", None);
 
         assert_eq!(
             labels.get("traefik.http.routers.api-123.rule"),
@@ -968,7 +985,8 @@ mod tests {
 
     #[test]
     fn build_traefik_labels_scopes_process_services_without_changing_host() {
-        let labels = build_traefik_labels("app", Some("api"), 8000, "123", "example.com", None);
+        let labels =
+            build_traefik_labels("app", Some("api"), 8000, Some("123"), "example.com", None);
 
         assert_eq!(
             labels.get("traefik.http.routers.app-api-123.rule"),
@@ -994,7 +1012,7 @@ mod tests {
 
     #[test]
     fn build_traefik_labels_does_not_add_tls_domains_for_localhost() {
-        let labels = build_traefik_labels("app", None, 8080, "123", "localhost", None);
+        let labels = build_traefik_labels("app", None, 8080, Some("123"), "localhost", None);
 
         assert!(!labels.contains_key("traefik.http.routers.app-123.tls.domains[0].main"));
         assert!(!labels.contains_key("traefik.http.routers.app-123.tls.domains[0].sans"));
@@ -1007,7 +1025,7 @@ mod tests {
             "api",
             None,
             8080,
-            "123",
+            Some("123"),
             "example.com",
             Some("api.datachef.localhost"),
         );
@@ -1021,7 +1039,7 @@ mod tests {
     #[test]
     fn labels_for_project_network_selects_reachable_network_for_traefik() {
         let labels = labels_for_project_network(
-            build_traefik_labels("api", None, 8080, "123", "example.com", None),
+            build_traefik_labels("api", None, 8080, Some("123"), "example.com", None),
             "paastech-project",
         );
 
