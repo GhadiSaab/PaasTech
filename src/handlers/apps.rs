@@ -26,6 +26,11 @@ pub struct LogsQuery {
 }
 
 #[derive(Deserialize)]
+pub struct ProcessQuery {
+    pub process: Option<String>,
+}
+
+#[derive(Deserialize)]
 pub struct EnvSetPayload {
     pub key: String,
     pub value: String,
@@ -686,7 +691,10 @@ pub async fn update(
 #[utoipa::path(
     post,
     path = "/app/{app_name}/stop",
-    params(("app_name" = String, Path, description = "Application name")),
+    params(
+        ("app_name" = String, Path, description = "Application name"),
+        ("process" = Option<String>, Query, description = "Process name to stop; stops all processes when omitted"),
+    ),
     responses(
         (status = 200, description = "Application stopped"),
         (status = 404, description = "Application not found"),
@@ -699,6 +707,7 @@ pub async fn stop(
     scope: ProjectScope,
     scheduler: web::Data<Scheduler>,
     req: HttpRequest,
+    query: web::Query<ProcessQuery>,
 ) -> impl Responder {
     let app_name = app_name_from_request(&req);
     let app = match Registry::get_in_project(&scope.pool, scope.project.id, &app_name).await {
@@ -709,7 +718,17 @@ pub async fn stop(
             return HttpResponse::InternalServerError().finish();
         }
     };
-    for process in app.processes {
+    let processes: Vec<_> = match query.process.as_deref() {
+        Some(process_name) => {
+            let Some(process) = app.processes.into_iter().find(|p| p.name == process_name) else {
+                return HttpResponse::NotFound().body("process not found");
+            };
+            vec![process]
+        }
+        None => app.processes,
+    };
+
+    for process in processes {
         scheduler
             .stop(&app_process_container_name(
                 app.project_id,
@@ -730,7 +749,10 @@ pub async fn stop(
 #[utoipa::path(
     post,
     path = "/app/{app_name}/restart",
-    params(("app_name" = String, Path, description = "Application name")),
+    params(
+        ("app_name" = String, Path, description = "Application name"),
+        ("process" = Option<String>, Query, description = "Process name to restart; restarts all processes when omitted"),
+    ),
     responses(
         (status = 200, description = "Application restarted"),
         (status = 404, description = "Application not found"),
@@ -743,6 +765,7 @@ pub async fn restart(
     scope: ProjectScope,
     scheduler: web::Data<Scheduler>,
     req: HttpRequest,
+    query: web::Query<ProcessQuery>,
 ) -> impl Responder {
     let app_name = app_name_from_request(&req);
     let app = match Registry::get_in_project(&scope.pool, scope.project.id, &app_name).await {
@@ -763,7 +786,17 @@ pub async fn restart(
         }
     };
 
-    for process in app.processes {
+    let processes: Vec<_> = match query.process.as_deref() {
+        Some(process_name) => {
+            let Some(process) = app.processes.into_iter().find(|p| p.name == process_name) else {
+                return HttpResponse::NotFound().body("process not found");
+            };
+            vec![process]
+        }
+        None => app.processes,
+    };
+
+    for process in processes {
         let Some(image) = process.image_id.as_deref().filter(|s| !s.is_empty()) else {
             return HttpResponse::BadRequest().json(json!({
                 "error": format!("process '{}' has no image_id", process.name)
@@ -947,6 +980,7 @@ pub async fn delete(
     params(
         ("app_name" = String, Path, description = "Application name"),
         ("tail" = Option<usize>, Query, description = "Number of lines to return from the end (default: all)"),
+        ("process" = Option<String>, Query, description = "Process name to read logs from"),
     ),
     responses(
         (status = 200, description = "Container logs", content_type = "text/plain"),

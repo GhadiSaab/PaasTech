@@ -104,18 +104,27 @@ enum AppCommands {
         /// Application name
         #[arg(add = ArgValueCompleter::new(AppNameCompleter))]
         name: String,
+        /// Process name
+        #[arg(long)]
+        process: Option<String>,
     },
     /// Stop a running application
     Stop {
         /// Application name
         #[arg(add = ArgValueCompleter::new(AppNameCompleter))]
         name: String,
+        /// Stop only this process
+        #[arg(long)]
+        process: Option<String>,
     },
     /// Restart an application
     Restart {
         /// Application name
         #[arg(add = ArgValueCompleter::new(AppNameCompleter))]
         name: String,
+        /// Restart only this process
+        #[arg(long)]
+        process: Option<String>,
     },
     /// Upload a zip of source code to the server
     Upload {
@@ -137,6 +146,9 @@ enum AppCommands {
         /// Stream logs in real time (like docker logs -f)
         #[arg(long, short = 'f')]
         follow: bool,
+        /// Show logs for this process
+        #[arg(long)]
+        process: Option<String>,
     },
     /// Manage environment variables
     Env {
@@ -320,9 +332,11 @@ async fn async_main() {
         Commands::App { command } => match command {
             AppCommands::List => apps::list().await,
             AppCommands::Delete { name } => apps::delete(&name).await,
-            AppCommands::Info { name } => apps::info(&name).await,
-            AppCommands::Stop { name } => apps::stop(&name).await,
-            AppCommands::Restart { name } => apps::restart(&name).await,
+            AppCommands::Info { name, process } => apps::info(&name, process.as_deref()).await,
+            AppCommands::Stop { name, process } => apps::stop(&name, process.as_deref()).await,
+            AppCommands::Restart { name, process } => {
+                apps::restart(&name, process.as_deref()).await
+            }
             AppCommands::Upload { source } => apps::upload(&source).await,
             AppCommands::Logs {
                 name,

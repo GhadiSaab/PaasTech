@@ -26,6 +26,8 @@ struct AppProcess {
     name: String,
     process_type: String,
     image_id: Option<String>,
+    container_id: Option<String>,
+    internal_port: Option<i32>,
     host_port: Option<i32>,
     status: String,
 }
@@ -210,10 +212,37 @@ fn app_url(name: &str, action: &str) -> Result<reqwest::Url, String> {
     Ok(url)
 }
 
+fn project_app_list_url() -> Result<String, String> {
+    let project = require_project()?;
+    Ok(format!("{}/project/{}/app", api_base(), project))
+}
+
+async fn fetch_app(name: &str) -> Result<Option<App>, String> {
+    let resp = reqwest::get(project_app_list_url()?)
+        .await
+        .map_err(|e| format!("Request failed: {e}"))?;
+
+    if !resp.status().is_success() {
+        return Err(format!("Server error: {}", resp.status()));
+    }
+
+    let apps: Vec<App> = resp
+        .json()
+        .await
+        .map_err(|e| format!("Failed to parse response: {e}"))?;
+    Ok(apps.into_iter().find(|app| app.name == name))
+}
+
 // POST /app/{name}/stop — exists
-pub async fn stop(name: &str) -> Result<(), String> {
-    let url = app_url(name, "stop")?;
-    let pb = spinner(&format!("Stopping {}...", name));
+pub async fn stop(name: &str, process: Option<&str>) -> Result<(), String> {
+    let mut url = app_url(name, "stop")?;
+    if let Some(process) = process {
+        url.query_pairs_mut().append_pair("process", process);
+    }
+    let label = process
+        .map(|process| format!("{name}/{process}"))
+        .unwrap_or_else(|| name.to_string());
+    let pb = spinner(&format!("Stopping {}...", label));
     let client = http_client();
     let resp = client
         .post(url)
@@ -223,8 +252,13 @@ pub async fn stop(name: &str) -> Result<(), String> {
     pb.finish_and_clear();
 
     match resp.status().as_u16() {
-        200 => println!("{} App {} stopped", "✓".green(), name.bold()),
-        404 => return Err(format!("App '{}' not found", name)),
+        200 => println!("{} App {} stopped", "✓".green(), label.bold()),
+        404 => {
+            return Err(match process {
+                Some(process) => format!("App '{}' or process '{}' not found", name, process),
+                None => format!("App '{}' not found", name),
+            });
+        }
         code => return Err(format!("Server error: {}", code)),
     }
 
@@ -232,9 +266,15 @@ pub async fn stop(name: &str) -> Result<(), String> {
 }
 
 // POST /app/{name}/restart — exists
-pub async fn restart(name: &str) -> Result<(), String> {
-    let url = app_url(name, "restart")?;
-    let pb = spinner(&format!("Restarting {}...", name));
+pub async fn restart(name: &str, process: Option<&str>) -> Result<(), String> {
+    let mut url = app_url(name, "restart")?;
+    if let Some(process) = process {
+        url.query_pairs_mut().append_pair("process", process);
+    }
+    let label = process
+        .map(|process| format!("{name}/{process}"))
+        .unwrap_or_else(|| name.to_string());
+    let pb = spinner(&format!("Restarting {}...", label));
     let client = http_client();
     let resp = client
         .post(url)
@@ -244,8 +284,13 @@ pub async fn restart(name: &str) -> Result<(), String> {
     pb.finish_and_clear();
 
     match resp.status().as_u16() {
-        200 => println!("{} App {} restarted", "✓".green(), name.bold()),
-        404 => return Err(format!("App '{}' not found", name)),
+        200 => println!("{} App {} restarted", "✓".green(), label.bold()),
+        404 => {
+            return Err(match process {
+                Some(process) => format!("App '{}' or process '{}' not found", name, process),
+                None => format!("App '{}' not found", name),
+            });
+        }
         code => return Err(format!("Server error: {}", code)),
     }
 
@@ -285,7 +330,43 @@ pub async fn delete(name: &str) -> Result<(), String> {
 }
 
 // GET /app/{name}
-pub async fn info(name: &str) -> Result<(), String> {
+pub async fn info(name: &str, process: Option<&str>) -> Result<(), String> {
+    if let Some(process_name) = process {
+        let app = fetch_app(name)
+            .await?
+            .ok_or_else(|| format!("App '{}' not found", name))?;
+        let process = app
+            .processes
+            .iter()
+            .find(|process| process.name == process_name)
+            .ok_or_else(|| format!("App '{}' or process '{}' not found", name, process_name))?;
+        let (colored, _) = colored_status(&process.status);
+        println!("App:       {}", name.bold());
+        println!("Process:   {}", process.name.bold());
+        println!("Type:      {}", process.process_type);
+        println!("Status:    {}", colored);
+        println!("Image:     {}", process.image_id.as_deref().unwrap_or("-"));
+        println!(
+            "Container: {}",
+            process.container_id.as_deref().unwrap_or("-")
+        );
+        println!(
+            "Port:      {}",
+            process
+                .host_port
+                .map(|port| port.to_string())
+                .unwrap_or_else(|| "-".to_string())
+        );
+        println!(
+            "Internal:  {}",
+            process
+                .internal_port
+                .map(|port| port.to_string())
+                .unwrap_or_else(|| "-".to_string())
+        );
+        return Ok(());
+    }
+
     // Status exists: GET /app/{name}/status
     let url = app_url(name, "status")?;
     let resp = reqwest::get(url)
@@ -358,7 +439,12 @@ pub async fn logs(
                 print!("{}", text);
             }
         }
-        404 => return Err(format!("App '{}' not found", name)),
+        404 => {
+            return Err(match process {
+                Some(process) => format!("App '{}' or process '{}' not found", name, process),
+                None => format!("App '{}' not found", name),
+            });
+        }
         code => return Err(format!("Server error: {}", code)),
     }
 
