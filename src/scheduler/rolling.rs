@@ -31,6 +31,7 @@ impl Scheduler {
         env: Vec<String>,
         public_host: Option<&str>,
         base_domain: Option<&str>,
+        replica_group: Option<&str>,
     ) -> Result<(), DeployError> {
         let domain = resolve_domain(base_domain);
         let image = self.pull(new_image).await?;
@@ -163,19 +164,34 @@ impl Scheduler {
             }
         };
         let traefik_net = (domain != "localhost").then(traefik_network_name);
-        let mut labels = build_traefik_labels(
-            app_name,
-            Some(process_name),
-            internal_port,
-            &version,
-            &domain,
-            public_host,
-        );
-        let router_name = format!("{app_name}-{process_name}-{version}");
-        labels.insert(
-            format!("traefik.http.routers.{router_name}.priority"),
-            version.clone(),
-        );
+        let labels = if let Some(group) = replica_group {
+            // Replicas: fixed service name shared across all replicas — no version, no priority.
+            // The old renamed container keeps its labels, so during the 3s overlap Traefik
+            // routes to both old and new replicas, then the old one is removed.
+            build_traefik_labels(
+                app_name,
+                Some(group),
+                internal_port,
+                None,
+                &domain,
+                public_host,
+            )
+        } else {
+            let mut labels = build_traefik_labels(
+                app_name,
+                Some(process_name),
+                internal_port,
+                Some(&version),
+                &domain,
+                public_host,
+            );
+            let router_name = format!("{app_name}-{process_name}-{version}");
+            labels.insert(
+                format!("traefik.http.routers.{router_name}.priority"),
+                version.clone(),
+            );
+            labels
+        };
         if let Err(e) = self
             .docker
             .rename_container(

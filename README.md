@@ -2,6 +2,13 @@
 
 A self-hosted Platform as a Service (PaaS) for deploying and managing containerised applications from the terminal.
 
+## Contributors
+
+- Izoret Raphaël
+- Martel Dimitri
+- Michault Louis
+- Saab Ghadi
+
 ## Architecture
 
 - **API** (`src/`) — Actix-web REST API backed by PostgreSQL and Docker (via Bollard)

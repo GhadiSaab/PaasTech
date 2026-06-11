@@ -186,6 +186,7 @@ async fn handle_upload(
             json!(process.build_env),
             process.port.map(|p| p as i32),
             "building",
+            process.replica_group.as_deref(),
         )
         .await
         {
@@ -270,6 +271,7 @@ async fn handle_upload(
                     None,
                     process.public_host.as_deref(),
                     env_vars,
+                    process.replica_group.as_deref(),
                 )
                 .await
             {
@@ -454,6 +456,7 @@ pub async fn update(
                 json!(process.build_env),
                 process.port.map(|p| p as i32),
                 "building",
+                process.replica_group.as_deref(),
             )
             .await
             {
@@ -476,6 +479,7 @@ pub async fn update(
                 json!(process.build_env),
                 process.port.map(|p| p as i32),
                 "building",
+                process.replica_group.as_deref(),
             )
             .await
             {
@@ -575,6 +579,7 @@ pub async fn update(
                             env_vars,
                             process.public_host.as_deref(),
                             base_domain.as_deref(),
+                            process.replica_group.as_deref(),
                         )
                         .await
                     {
@@ -595,6 +600,7 @@ pub async fn update(
                             base_domain.as_deref(),
                             process.public_host.as_deref(),
                             env_vars,
+                            process.replica_group.as_deref(),
                         )
                         .await
                 }
@@ -620,6 +626,7 @@ pub async fn update(
                             base_domain.as_deref(),
                             process.public_host.as_deref(),
                             env_vars,
+                            process.replica_group.as_deref(),
                         )
                         .await
                 }
@@ -838,6 +845,7 @@ pub async fn restart(
                 app.base_domain.as_deref(),
                 process.public_host.as_deref(),
                 env_vars,
+                process.replica_group.as_deref(),
             )
             .await
         {

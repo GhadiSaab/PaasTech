@@ -52,6 +52,7 @@ pub struct AppProcess {
     pub internal_port: Option<i32>,
     pub host_port: Option<i32>,
     pub status: String,
+    pub replica_group: Option<String>,
     #[schema(value_type = Option<String>)]
     pub created_at: Option<NaiveDateTime>,
 }
@@ -75,6 +76,7 @@ pub struct ActiveAppProcess {
     pub host_port: Option<i32>,
     pub status: String,
     pub base_domain: Option<String>,
+    pub replica_group: Option<String>,
 }
 
 pub fn derived_status(processes: &[AppProcess]) -> &'static str {
